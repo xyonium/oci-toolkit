@@ -1,0 +1,18 @@
+# Secrets & local state — never commit
+.env
+*.pem
+*.key
+logs/
+venv/
+__pycache__/
+*.pyc
+.oci/
+
+# Design docs contain live account identifiers — keep local only
+docs/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
