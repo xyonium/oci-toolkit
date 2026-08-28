@@ -175,6 +175,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+# 成功标记：已抢到容量并创建过实例后，不再重复启动（gpu 重启/服务重拉时兜底）
+# 删除该文件可重新进入轮询：rm ~/oci-arm-relaunch/logs/.success
+SUCCESS_FLAG="$LOG_DIR/.success"
+if [ -f "$SUCCESS_FLAG" ]; then
+    say "检测到成功标记 $SUCCESS_FLAG，实例已创建过，跳过轮询。"
+    say "（如需重新抢容量: rm $SUCCESS_FLAG 后重启服务）"
+    exit 0
+fi
+
 say "=== oci-toolkit: 基于引导卷重开 ARM 实例 ==="
 say "引导卷: $BOOT_VOLUME_ID"
 say "可用域: $TARGET_AD   规格: $SHAPE ($OCPUS OCPU / ${MEMORY_GB}GB)"
@@ -208,6 +217,8 @@ while true; do
         instance_id=$(printf '%s' "$out" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"]["id"])' 2>/dev/null || echo "未知")
         say "🎉 容量到手！"
         report_instance "$instance_id"
+        # 落成功标记：服务再被拉起时直接退出，不会重复开机
+        printf '%s\n' "$instance_id" > "$SUCCESS_FLAG"
         say "=== 脚本结束（服务将转为 inactive）==="
         exit 0
     fi
