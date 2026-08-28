@@ -29,6 +29,8 @@ source "$ENV_FILE"
 
 if [ -n "${OCI_BIN:-}" ]; then OCI_BIN=$(eval echo "$OCI_BIN"); fi
 OCI_BIN="${OCI_BIN:-oci}"
+# 若 OCI_BIN 为裸命令名（如 "oci"），先解析到真实二进制路径，避免与下方 oci() 函数同名递归
+if [ "$OCI_BIN" = "oci" ]; then OCI_BIN="$(command -v oci || true)"; fi
 PROFILE="${OCI_PROFILE:-DEFAULT}"
 [ -n "${COMPARTMENT_ID:-}" ] || { echo "错误: COMPARTMENT_ID 未配置" >&2; exit 1; }
 if [ "$DRY_RUN" -eq 0 ]; then
@@ -37,33 +39,34 @@ fi
 command -v python3 >/dev/null 2>&1 || { echo "错误: 需要 python3" >&2; exit 1; }
 
 oci() { "$OCI_BIN" --profile "$PROFILE" --auth api_key "$@"; }
-say() { echo "[$(date '+%H:%M:%S')] $*"; }
+say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 # ─── 发现 default VCN / RT / SL ──────────────────────────────────────────────
 VCN_ID="${VCN_ID:-}"
 if [ -z "$VCN_ID" ]; then
-    VCN_ID=$(oci network vcn list --compartment-id "$COMPARTMENT_ID" --output json 2>/dev/null | python3 -c '
+    VCN_ID=$(oci network vcn list --compartment-id "$COMPARTMENT_ID" --output json --all | python3 -c '
 import sys, json
 d = json.load(sys.stdin)["data"]
 pref = [v for v in d if "default" in (v.get("display-name") or "").lower()]
 print((pref or d)[0]["id"] if d else "")
-')
+' 2>/dev/null || echo "")
     [ -n "$VCN_ID" ] || { say "❌ 未找到任何 VCN"; exit 1; }
 fi
-VCN_JSON=$(oci network vcn get --vcn-id "$VCN_ID" --output json 2>/dev/null)
+VCN_JSON=$(oci network vcn get --vcn-id "$VCN_ID" --output json) || { say "❌ 读取 VCN 信息失败"; exit 1; }
 RT_ID=$(printf '%s' "$VCN_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["default-route-table-id"])')
 SL_ID=$(printf '%s' "$VCN_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["default-security-list-id"])')
+[ -n "$RT_ID" ] && [ -n "$SL_ID" ] || { say "❌ 解析 VCN JSON 失败"; exit 1; }
 say "VCN: $VCN_ID"
 say "RT:  $RT_ID"
 say "SL:  $SL_ID"
 
 # ─── 1. Internet Gateway ─────────────────────────────────────────────────────
 IGW_ID=$(oci network internet-gateway list --compartment-id "$COMPARTMENT_ID" \
-    --vcn-id "$VCN_ID" --output json 2>/dev/null | python3 -c '
+    --vcn-id "$VCN_ID" --output json --all | python3 -c '
 import sys, json
 d = json.load(sys.stdin)["data"]
 print(d[0]["id"] if d else "")
-')
+' 2>/dev/null || echo "")
 if [ -n "$IGW_ID" ]; then
     say "IGW 已存在: $IGW_ID"
 elif [ "$DRY_RUN" -eq 1 ]; then
@@ -73,12 +76,13 @@ else
     IGW_ID=$(oci network internet-gateway create \
         --compartment-id "$COMPARTMENT_ID" --vcn-id "$VCN_ID" \
         --display-name "igw-internet" --enabled true \
-        --query 'data.id' --raw-output)
+        --query 'data.id' --raw-output) || { say "❌ IGW 创建失败"; exit 1; }
+    [ -n "$IGW_ID" ] || { say "❌ IGW 创建失败"; exit 1; }
     say "IGW 创建成功: $IGW_ID"
 fi
 
 # ─── 2. 默认路由表：0.0.0.0/0 + ::/0 → IGW ───────────────────────────────────
-RT_JSON=$(oci network route-table get --rt-id "$RT_ID" --output json 2>/dev/null)
+RT_JSON=$(oci network route-table get --rt-id "$RT_ID" --output json) || { say "❌ 读取路由表信息失败"; exit 1; }
 NEW_RULES=$(printf '%s' "$RT_JSON" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)["data"]
@@ -90,19 +94,22 @@ for dest in ("0.0.0.0/0", "::/0"):
         rules.append({"network-entity-id": igw, "destination": dest, "destination-type": "CIDR_BLOCK"})
 json.dump(rules, sys.stdout)
 ' "$IGW_ID")
+[ -n "$NEW_RULES" ] || { say "❌ 解析路由表 JSON 失败"; exit 1; }
 if [ "$DRY_RUN" -eq 1 ]; then
     say "[dry-run] 将更新路由表: $(printf '%s' "$NEW_RULES" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))') 条规则（补 0.0.0.0/0 与 ::/0）"
 else
-    printf '%s' "$NEW_RULES" | python3 -c 'import sys,json; rules=json.load(sys.stdin); print("路由规则:"); [print("  ", r["destination"], "->", r["network-entity-id"][-12:]) for r in rules]'
+    printf '%s' "$NEW_RULES" | python3 -c 'import sys,json; rules=json.load(sys.stdin); print("路由规则:"); [print("  ", r["destination"], "->", r["network-entity-id"][-12:]) for r in rules]' | while IFS= read -r line; do say "$line"; done
     oci network route-table update --rt-id "$RT_ID" \
         --route-rules "$(printf '%s' "$NEW_RULES")" --force >/dev/null \
-        && say "✅ 路由表已更新（双栈默认路由 → IGW）"
+        || { say "❌ 路由表更新失败"; exit 1; }
+    say "✅ 路由表已更新（双栈默认路由 → IGW）"
 fi
 
 # ─── 3. 默认安全列表：合并追加自定义入站规则 ─────────────────────────────────
-SL_JSON=$(oci network security-list get --security-list-id "$SL_ID" --output json 2>/dev/null)
+SL_JSON=$(oci network security-list get --security-list-id "$SL_ID" --output json) || { say "❌ 读取安全列表信息失败"; exit 1; }
 MERGED_FILE=$(mktemp)
-LOG_DIR_SL_SUMMARY=$(mktemp)
+SL_SUMMARY_FILE=$(mktemp)
+trap 'rm -f "$MERGED_FILE" "$SL_SUMMARY_FILE"' EXIT
 printf '%s' "$SL_JSON" | python3 -c '
 import sys, json
 
@@ -156,8 +163,8 @@ added = [r for r in want if key(r) not in have]
 ing.extend(added)
 json.dump({"ingress-security-rules": ing, "egress-security-rules": eg}, sys.stdout)
 print("ADDED=%d TOTAL_INGRESS=%d TOTAL_EGRESS=%d" % (len(added), len(ing), len(eg)), file=sys.stderr)
-' > "$MERGED_FILE" 2>"$LOG_DIR_SL_SUMMARY" || { say "❌ 规则合并失败"; cat "$LOG_DIR_SL_SUMMARY" >&2; rm -f "$MERGED_FILE" "$LOG_DIR_SL_SUMMARY"; exit 1; }
-SUMMARY=$(cat "$LOG_DIR_SL_SUMMARY")
+' > "$MERGED_FILE" 2>"$SL_SUMMARY_FILE" || { say "❌ 规则合并失败"; cat "$SL_SUMMARY_FILE" >&2; exit 1; }
+SUMMARY=$(cat "$SL_SUMMARY_FILE")
 say "安全列表合并: $SUMMARY"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -167,8 +174,8 @@ elif [ "$(printf '%s' "$SUMMARY" | sed -n 's/^ADDED=\([0-9]*\).*/\1/p')" = "0" ]
 else
     oci network security-list update --security-list-id "$SL_ID" \
         --from-json "file://$MERGED_FILE" --force >/dev/null \
-        && say "✅ 安全列表已更新"
+        || { say "❌ 安全列表更新失败"; exit 1; }
+    say "✅ 安全列表已更新"
 fi
-rm -f "$MERGED_FILE" "$LOG_DIR_SL_SUMMARY"
 
 say "=== 完成。SUBNET 自动发现见: oci network subnet list --compartment-id <tenancy> --vcn-id $VCN_ID ==="
