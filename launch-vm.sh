@@ -7,6 +7,8 @@
 #   --arm     A1.Flex (2 OCPU/12GB, 106GB)，在 $ADS 各可用域间轮换抢容量并轮询
 #   --once    只尝试一次（成功或失败都退出）
 #   --dry-run 只打印将要执行的命令，不真正调用；env文件默认为同目录 .env
+#
+# 退出码: 0=成功, 1=不可重试错误, 2=未知响应, 3=单次尝试未获得容量
 
 set -uo pipefail
 
@@ -23,7 +25,7 @@ while [ $# -gt 0 ]; do
         --arm)     MODE="arm" ;;
         --dry-run) DRY_RUN=1 ;;
         --once)    ONCE=1 ;;
-        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
         *)         ENV_FILE="$1" ;;
     esac
     shift
@@ -31,7 +33,7 @@ done
 
 if [ -z "$MODE" ]; then
     echo "错误: 必须指定模式 --x86 或 --arm" >&2
-    sed -n '2,9p' "$0" >&2
+    sed -n '2,11p' "$0" >&2
     exit 1
 fi
 
@@ -74,7 +76,8 @@ else
     }
 fi
 # 成功标记：ARM 抢到容量后落盘，重跑直接退出
-SUCCESS_FLAG="$LOG_DIR/.success"
+# 独立文件名（.success-vm-arm），避免与 launch-from-bv.sh 的 .success 冲突
+SUCCESS_FLAG="$LOG_DIR/.success-vm-arm"
 
 # ─── SSH 公钥校验（两种模式都需要） ───────────────────────────────────────────
 require_ssh_key() {
@@ -94,7 +97,7 @@ require_ssh_key() {
 # 注意：本机 OCI CLI 为旧版本，compute image list 必须带 --compartment-id，否则报错
 find_image() {
     local shape="$1" id rc
-    id=$("$OCI_BIN" --profile "$PROFILE" --auth api_key compute image list \
+    id=$(oci compute image list \
         --compartment-id "$COMPARTMENT_ID" \
         --operating-system "Canonical Ubuntu" \
         --operating-system-version "24.04" \
@@ -219,8 +222,11 @@ x86_launch() {
 
 run_x86() {
     X86_NAMES="${X86_NAMES:-}"
+    # 去空白后再校验：纯空格值会变成零次循环，静默无事发生
+    X86_NAMES="$(printf '%s' "$X86_NAMES" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
     [ -n "$X86_NAMES" ] || { say "❌ X86_NAMES 未配置（.env 中空格分隔的实例名列表）"; exit 1; }
     X86_AD="${X86_AD:-}"
+    X86_AD="$(printf '%s' "$X86_AD" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
     [ -n "$X86_AD" ] || { say "❌ X86_AD 未配置（.env 中目标可用域）"; exit 1; }
     X86_BV_GB="${X86_BV_GB:-47}"
     X86_IPV6="${X86_IPV6:-true}"
@@ -234,12 +240,14 @@ run_x86() {
         say "✅ 使用镜像: $image_id"
     fi
 
-    local n
+    local n failures=0
     for n in $X86_NAMES; do
         say "--- $n ---"
         if [ "$DRY_RUN" -eq 0 ]; then
             # 幂等：已有同名非终止实例则跳过
-            local existing
+            # 注意检查 oci 调用本身的 rc：列表查询失败不能当作"无实例"继续启动，
+            # 否则免费层上可能打出重复实例
+            local existing qrc
             existing=$(oci compute instance list --compartment-id "$COMPARTMENT_ID" \
                 --display-name "$n" --all 2>/dev/null | python3 -c '
 import sys, json
@@ -249,7 +257,12 @@ except Exception:
     sys.exit(1)
 alive = [v["id"] for v in d if (v.get("lifecycle-state") or "") not in ("TERMINATED", "TERMINATING")]
 print(alive[0] if alive else "")
-' 2>/dev/null || echo "")
+' 2>/dev/null)
+            qrc=$?
+            if [ $qrc -ne 0 ]; then
+                say "❌ 检查 $n 同名实例失败（rc=$qrc），终止以避免重复启动"
+                exit 1
+            fi
             if [ -n "$existing" ]; then
                 say "⚠️ 已存在同名非终止实例 ($existing)，跳过 $n"
                 continue
@@ -281,10 +294,15 @@ print(alive[0] if alive else "")
             fi
             report_instance "$instance_id"
         else
+            failures=$((failures + 1))
             say "❌ $n 启动失败 (rc=$rc): $(brief_of "$out")"
             printf '%s\n' "$out" | tail -20
         fi
     done
+    if [ "$failures" -gt 0 ]; then
+        say "❌ x86 模式完成，$failures 个实例启动失败"
+        exit 1
+    fi
     say "=== x86 模式完成 ==="
 }
 
@@ -301,6 +319,7 @@ run_arm() {
     JITTER="${JITTER:-100}"
     BACKOFF_AFTER_429="${BACKOFF_AFTER_429:-5}"
     ASSIGN_PUBLIC_IP="${ASSIGN_PUBLIC_IP:-true}"
+    ASSIGN_IPV6="${ASSIGN_IPV6:-true}"
     require_ssh_key
 
     # 成功标记：已抢到容量并创建过实例后，不再重复启动
@@ -309,7 +328,9 @@ run_arm() {
         say "（如需重新抢容量: rm $SUCCESS_FLAG）"
         exit 0
     fi
-
+    # 去空白后再校验：纯空格值会让循环零次或模除归零
+    ADS="$(printf '%s' "$ADS" | tr -s '[:space:]' ' ' | sed -e 's/^ //' -e 's/ $//')"
+    [ -n "$ADS" ] || { say "❌ ADS 未配置（.env 中空格分隔的可用域列表）"; exit 1; }
     local -a ad_list
     read -ra ad_list <<< "$ADS"
 
@@ -324,8 +345,10 @@ run_arm() {
     if [ "$DRY_RUN" -eq 1 ]; then
         # dry-run：每个 AD 打印一次计划命令后退出（避免无限循环）
         local ad
+        local ipv6_extra=""
+        [ "$ASSIGN_IPV6" = "true" ] && ipv6_extra="--assign-ipv6-ip true"
         for ad in "${ad_list[@]}"; do
-            say "[dry-run] (AD: $ad) 将执行: $OCI_BIN --profile $PROFILE --auth api_key compute instance launch --compartment-id \"$COMPARTMENT_ID\" --availability-domain \"$ad\" --shape \"$SHAPE\" --shape-config '{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}' --image-id \"$image_id\" --display-name \"$INSTANCE_ARM_NAME\" --assign-public-ip \"$ASSIGN_PUBLIC_IP\" --assign-ipv6-ip true --boot-volume-size-in-gbs \"$ARM_BV_GB\" --ssh-authorized-keys-file \"$SSH_KEY_FILE\" --no-retry --connection-timeout 60 --read-timeout 120"
+            say "[dry-run] (AD: $ad) 将执行: $OCI_BIN --profile $PROFILE --auth api_key compute instance launch --compartment-id \"$COMPARTMENT_ID\" --availability-domain \"$ad\" --shape \"$SHAPE\" --shape-config '{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}' --image-id \"$image_id\" --display-name \"$INSTANCE_ARM_NAME\" --assign-public-ip \"$ASSIGN_PUBLIC_IP\" $ipv6_extra --boot-volume-size-in-gbs \"$ARM_BV_GB\" --ssh-authorized-keys-file \"$SSH_KEY_FILE\" --no-retry --connection-timeout 60 --read-timeout 120"
         done
         exit 0
     fi
@@ -343,6 +366,8 @@ run_arm() {
         say "--- 第 $attempt 次尝试（AD: $ad）---"
 
         local out rc
+        local ipv6_extra=""
+        [ "$ASSIGN_IPV6" = "true" ] && ipv6_extra="--assign-ipv6-ip true"
         out=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$ad" \
@@ -351,7 +376,7 @@ run_arm() {
             --image-id "$image_id" \
             --display-name "$INSTANCE_ARM_NAME" \
             --assign-public-ip "$ASSIGN_PUBLIC_IP" \
-            --assign-ipv6-ip true \
+            $ipv6_extra \
             --boot-volume-size-in-gbs "$ARM_BV_GB" \
             --ssh-authorized-keys-file "$SSH_KEY_FILE" \
             --no-retry \
@@ -406,7 +431,7 @@ run_arm() {
                 ;;
         esac
 
-        [ "$ONCE" -eq 1 ] && { say "--once 模式：单次尝试结束"; exit 0; }
+        [ "$ONCE" -eq 1 ] && { say "--once 模式：单次尝试结束（未获得容量）"; exit 3; }
         interval=$((base + RANDOM % (JITTER + 1)))
         say "  ${interval}s 后重试（基准 ${base}s + 抖动）"
         sleep "$interval"
