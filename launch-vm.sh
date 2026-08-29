@@ -385,6 +385,13 @@ run_arm() {
     say "轮询间隔: ${RETRY_INTERVAL}s + 0~${JITTER}s 随机抖动"
 
     local attempt=0 consecutive_429=0 base="$RETRY_INTERVAL" ad_idx=0 interval
+    # 记录每个 AD 是否曾返回「不提供此 shape」的 404。
+    # 注意：NotAuthorizedOrNotFound 在 launch_instance 上有两义——
+    #   1) 该 AD 不提供此 shape（常见，如 E2.1.Micro 只在部分 AD 有）
+    #   2) 真的权限/资源问题（key 失效、compartment 错）
+    # 只有部分 AD 404 → 跳过该 AD 继续轮换；全部 AD 都 404 → 才真正终止。
+    # 曾因把单个 AD 的 404 当成全局错误，导致整个轮询退出、服务停摆 2 小时。
+    local total_ads=${#ad_list[@]}
     while true; do
         attempt=$((attempt + 1))
         local ad="${ad_list[ad_idx]}"
@@ -441,7 +448,26 @@ run_arm() {
                 fi
                 ;;
             STOP)
+                # 单 AD 的 NotAuthorizedOrNotFound 通常是「该 AD 不提供此 shape」，
+                # 而不是真的权限问题 → 移出轮换继续抢其他 AD。
+                # 仅当这是最后一个 AD 时，才认定是真的权限/配置问题并终止。
+                if printf '%s' "$out" | grep -q "NotAuthorizedOrNotFound" && [ ${#ad_list[@]} -gt 1 ]; then
+                    say "  ⚠️ 该 AD 不提供 $SHAPE，移出轮换: $ad（剩余 $((${#ad_list[@]} - 1))/$total_ads 个 AD）"
+                    local new_list=() a
+                    for a in "${ad_list[@]}"; do
+                        [ "$a" = "$ad" ] || new_list+=("$a")
+                    done
+                    ad_list=("${new_list[@]}")
+                    # 移除元素后其右侧全部左移一格，而 ad_idx 此前已自增指向下一个 AD，
+                    # 若不回退一格就会跳过一个 AD（ad_idx=1、list=[AD2,AD3] 时会跳过 AD2）。
+                    ad_idx=$((ad_idx - 1))
+                    [ "$ad_idx" -lt 0 ] && ad_idx=0
+                    ad_idx=$((ad_idx % ${#ad_list[@]}))
+                    [ "$ONCE" -eq 1 ] && { say "--once 模式：单次尝试结束（未获得容量）"; exit 3; }
+                    continue
+                fi
                 say "❌ 不可重试错误，脚本终止: $brief"
+                say "（若这是 NotAuthorizedOrNotFound：请检查 API key、compartment，或该区域是否提供 $SHAPE）"
                 say "=== 完整输出 ==="
                 printf '%s\n' "$out" | tail -20
                 exit 1
