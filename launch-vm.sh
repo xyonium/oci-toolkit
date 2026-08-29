@@ -97,6 +97,8 @@ require_ssh_key() {
 # 注意：本机 OCI CLI 为旧版本，compute image list 必须带 --compartment-id，否则报错
 find_image() {
     local shape="$1" id rc
+    # 注意：绝不能用 2>&1 合并 stderr —— 旧版 CLI 会往 stderr 打印分页 WARNING，
+    # 混入结果后 OCID 前缀校验会失败（曾导致镜像查询误报失败）。stderr 单独丢弃。
     id=$(oci compute image list \
         --compartment-id "$COMPARTMENT_ID" \
         --operating-system "Canonical Ubuntu" \
@@ -104,7 +106,7 @@ find_image() {
         --shape "$shape" \
         --sort-by TIMECREATED --sort-order DESC \
         --limit 1 \
-        --query 'data[0].id' --raw-output 2>&1)
+        --query 'data[0].id' --raw-output 2>/dev/null)
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$id" ] || [ "$id" = "null" ]; then
         say "❌ 找不到 Ubuntu 24.04 $shape 镜像（rc=$rc）"
@@ -173,16 +175,32 @@ report_instance() {
                 say "✅ 实例已 RUNNING"
                 local ips
                 ips=$(oci compute instance list-vnics --instance-id "$instance_id" \
-                    --compartment-id "$COMPARTMENT_ID" 2>/dev/null | python3 -c '
+                    --compartment-id "$COMPARTMENT_ID" --output json 2>/dev/null | python3 -c '
 import sys, json
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(1)
 try:
-    d = json.load(sys.stdin)["data"]
+    d = json.loads(raw)
+    d = d["data"] if isinstance(d, dict) and "data" in d else d
+    if not isinstance(d, list):
+        sys.exit(1)
 except Exception:
     sys.exit(1)
 for v in d:
+    if not isinstance(v, dict):
+        continue
     print("  公网 IPv4:", v.get("public-ip") or "(无)")
+    print("  私网 IPv4:", v.get("private-ip") or "(无)")
+    # 注意：不同 CLI 版本返回结构不同 —— 有的是 ["2603:..."] 字符串列表，
+    # 有的是 [{"address": "2603:..."}] 字典列表，两种都要兼容
     for ip6 in (v.get("ipv6-addresses") or []):
-        print("  公网 IPv6:", ip6.get("address"))
+        if isinstance(ip6, dict):
+            addr = ip6.get("address") or ip6.get("ip-address")
+        else:
+            addr = ip6
+        if addr:
+            print("  公网 IPv6:", addr)
 ') || { say "⚠️ 获取网络信息失败"; return 0; }
                 say "网络信息：
 $ips"
@@ -244,25 +262,33 @@ run_x86() {
     for n in $X86_NAMES; do
         say "--- $n ---"
         if [ "$DRY_RUN" -eq 0 ]; then
-            # 幂等：已有同名非终止实例则跳过
-            # 注意检查 oci 调用本身的 rc：列表查询失败不能当作"无实例"继续启动，
-            # 否则免费层上可能打出重复实例
-            local existing qrc
-            existing=$(oci compute instance list --compartment-id "$COMPARTMENT_ID" \
-                --display-name "$n" --all 2>/dev/null | python3 -c '
-import sys, json
+            # 幂等：已有同名非终止实例则跳过。
+            # 注意：本机旧版 OCI CLI 在 list 结果为空时输出**零字节**（不是 {"data":[]}），
+            # 因此"输出为空"≠"查询失败"——必须区分：命令 rc 非 0 才算真失败（此时终止，
+            # 避免免费层上打出重复实例）；输出为空但命令成功 = 没有同名实例，正常继续。
+            local existing listrc
+            listout=$(oci compute instance list --compartment-id "$COMPARTMENT_ID" \
+                --display-name "$n" --all --output json 2>/dev/null)
+            listrc=$?
+            if [ $listrc -ne 0 ]; then
+                say "❌ 查询 $n 同名实例失败（oci rc=$listrc），终止以避免重复启动"
+                exit 1
+            fi
+            existing=$(printf '%s' "$listout" | python3 -c '
+import sys
+raw = sys.stdin.read().strip()
+# 旧版 CLI 空结果返回空字符串 → 视为无实例
+if not raw:
+    sys.exit(0)
 try:
-    d = json.load(sys.stdin)["data"]
+    d = json.loads(raw)
+    while isinstance(d, dict) and "data" in d:
+        d = d["data"]
 except Exception:
     sys.exit(1)
 alive = [v["id"] for v in d if (v.get("lifecycle-state") or "") not in ("TERMINATED", "TERMINATING")]
 print(alive[0] if alive else "")
-' 2>/dev/null)
-            qrc=$?
-            if [ $qrc -ne 0 ]; then
-                say "❌ 检查 $n 同名实例失败（rc=$qrc），终止以避免重复启动"
-                exit 1
-            fi
+' 2>/dev/null) || { say "❌ 解析 $n 同名实例列表失败，终止以避免重复启动"; exit 1; }
             if [ -n "$existing" ]; then
                 say "⚠️ 已存在同名非终止实例 ($existing)，跳过 $n"
                 continue
@@ -348,7 +374,7 @@ run_arm() {
         local ipv6_extra=""
         [ "$ASSIGN_IPV6" = "true" ] && ipv6_extra="--assign-ipv6-ip true"
         for ad in "${ad_list[@]}"; do
-            say "[dry-run] (AD: $ad) 将执行: $OCI_BIN --profile $PROFILE --auth api_key compute instance launch --compartment-id \"$COMPARTMENT_ID\" --availability-domain \"$ad\" --shape \"$SHAPE\" --shape-config '{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}' --image-id \"$image_id\" --display-name \"$INSTANCE_ARM_NAME\" --assign-public-ip \"$ASSIGN_PUBLIC_IP\" $ipv6_extra --boot-volume-size-in-gbs \"$ARM_BV_GB\" --ssh-authorized-keys-file \"$SSH_KEY_FILE\" --no-retry --connection-timeout 60 --read-timeout 120"
+            say "[dry-run] (AD: $ad) 将执行: $OCI_BIN --profile $PROFILE --auth api_key compute instance launch --compartment-id \"$COMPARTMENT_ID\" --availability-domain \"$ad\" --shape \"$SHAPE\" --shape-config '{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}' --image-id \"$image_id\" --subnet-id \"$SUBNET_ID\" --display-name \"$INSTANCE_ARM_NAME\" --assign-public-ip \"$ASSIGN_PUBLIC_IP\" $ipv6_extra --boot-volume-size-in-gbs \"$ARM_BV_GB\" --ssh-authorized-keys-file \"$SSH_KEY_FILE\" --no-retry --connection-timeout 60 --read-timeout 120"
         done
         exit 0
     fi
@@ -374,6 +400,7 @@ run_arm() {
             --shape "$SHAPE" \
             --shape-config "{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}" \
             --image-id "$image_id" \
+            --subnet-id "$SUBNET_ID" \
             --display-name "$INSTANCE_ARM_NAME" \
             --assign-public-ip "$ASSIGN_PUBLIC_IP" \
             $ipv6_extra \

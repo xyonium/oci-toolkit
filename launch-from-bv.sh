@@ -144,13 +144,23 @@ report_instance() {
                 local ips
                 ips=$("$OCI_BIN" compute instance list-vnics --instance-id "$instance_id" \
                     --compartment-id "$COMPARTMENT_ID" \
-                    --auth api_key 2>/dev/null | python3 -c '
+                    --auth api_key --output json 2>/dev/null | python3 -c '
 import sys, json
-d = json.load(sys.stdin)["data"]
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(1)
+d = json.loads(raw)
+d = d["data"] if isinstance(d, dict) and "data" in d else d
 for v in d:
+    if not isinstance(v, dict):
+        continue
     print("  公网 IPv4:", v.get("public-ip") or "(无)")
+    print("  私网 IPv4:", v.get("private-ip") or "(无)")
+    # 不同 CLI 版本结构不同：["2603:..."] 字符串列表 或 [{"address": "2603:..."}] 字典列表
     for ip6 in (v.get("ipv6-addresses") or []):
-        print("  公网 IPv6:", ip6.get("address"))
+        addr = (ip6.get("address") or ip6.get("ip-address")) if isinstance(ip6, dict) else ip6
+        if addr:
+            print("  公网 IPv6:", addr)
 ')
                 say "网络信息：
 $ips"
