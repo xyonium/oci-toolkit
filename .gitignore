@@ -16,3 +16,4 @@ docs/
 .idea/
 .DS_Store
 Thumbs.db
+iptables-dump/

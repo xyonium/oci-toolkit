@@ -49,7 +49,39 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 
 退出码：`0` 成功 / `1` 不可重试错误 / `2` 未知响应 / `3` 单次尝试未获得容量。
 
-### 4. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
+### 4. `init-iptables.sh` — 迁移 iptables 放行规则（v4 + v6 对称）
+
+```bash
+./init-iptables.sh ubuntu@<host> [ubuntu@<host2> ...]        # 默认 dry-run
+./init-iptables.sh ubuntu@<host> --apply                      # 实际执行
+```
+
+把旧主机上自配的 INPUT 放行规则补到新主机，**IPv4 与 IPv6 对称**。幂等（已存在则跳过），默认 dry-run。
+
+实测对比 4 台主机后确认的规则构成（详见脚本头部注释）：
+
+- Oracle 镜像自带的 `InstanceServices` 链（`169.254.0.0/16` 那批）**原样保留，不复制**
+- 放行规则全部是**纯端口匹配**，无一条绑定私有地址 → 可 1:1 翻译到 v6
+- 4 台的 `rules.v6` 原本都只有空表头；旧机内核里的 ip6tables 规则全是 **Docker 自建链**，由 Docker 自行管理，写进持久化文件会与 Docker 争抢规则，故不迁移
+
+**v6 与 v4 的两处关键差异**（照抄会出事）：
+
+1. **ICMPv6 不能当可选项**。它承担邻居发现（等价 IPv4 的 ARP）、PMTUD、SLAAC 地址重复检测。若照抄 v4 的 `-p icmp` 再加 REJECT 兜底，可能让 DAD 失败、IPv6 整体中断 → 脚本用 `-p ipv6-icmp` 显式全放行。
+2. **REJECT 类型不同**：v4 用 `icmp-host-prohibited`，v6 用 `icmp6-adm-prohibited`。
+
+**顺序约束**：默认策略是 `ACCEPT`，靠链尾一条 `-A INPUT -j REJECT` 兜底。所有放行规则必须插在它**之前**（用 `-I <行号>` 而非 `-A`），否则永不生效；v6 原本没有兜底，须在放行规则全部就位**之后**补建。首版漏补 v6 INPUT 兜底，导致 11 条 ACCEPT 形同虚设（policy ACCEPT = 全放行），已修。
+
+安全闸门：持久化前校验 22 端口在两栈放行列表内，否则拒绝 `netfilter-persistent save`，避免把自己锁在门外。
+
+### 5. `gather-iptables.sh` — 采集多台主机的 iptables 配置
+
+```bash
+./gather-iptables.sh ubuntu@host1 ubuntu@host2 ...
+```
+
+输出到 `iptables-dump/<host>/`：持久化文件的**字节数与规则条数**（用于判断 rules.v6 是否真为空）、磁盘上的 `rules.v4`/`rules.v6`、内核里实际生效的 live 规则（能看出有无未保存改动）、接口地址（识别绑定私有 IP 的规则）。对比新旧主机时的第一步。
+
+### 6. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
 
 TODO：定期把指定引导卷备份/复制到另一个区域，异地容灾。
 
@@ -120,6 +152,8 @@ oci-toolkit/
 ├── launch-from-bv.sh     # 基于已有引导卷自动重开 ARM 实例
 ├── setup-vcn.sh          # 幂等补齐 default VCN 的互联网出口与防火墙规则
 ├── launch-vm.sh          # 按最新 LTS 镜像开机（x86 即时 / ARM 多 AD 轮询）
+├── init-iptables.sh      # 迁移 iptables 放行规则（v4 + v6 对称，幂等，默认 dry-run）
+├── gather-iptables.sh    # 采集多台主机的 iptables 配置用于对比
 ├── setup.sh              # 安装 + systemd 服务管理
 ├── docs/                 # 设计文档
 └── README.md
@@ -130,6 +164,10 @@ oci-toolkit/
 - **引导卷最小 50GB**。OCI 会拒绝更小的请求（`Requested volume size 47GB is not in the allowed range`）。旧账户里 47GB 的卷是 2021 年的遗留值，现在建不出来。
 - **Always Free 块存储共 200GB**（home region 内，引导卷 + 块卷合计）。典型分配：2 台 x86 各 50GB + 1 台 ARM 100GB。
 - **shape 与 AD 相关**：某 AD 不提供某 shape 时返回 `NotAuthorizedOrNotFound`（404），不是权限问题。换 AD 试试。
+- **单个 AD 的 404 不能当全局错误**。多 AD 轮询时若把某个 AD 的 404 一律视为不可重试，会导致整个轮询退出；配合 systemd 的 `RestartPreventExitStatus=1`，轮询会**永久停摆且无人察觉**（实测静默死了 2 小时）。正确做法：移出该 AD 继续轮换，只剩最后一个 AD 时才认定是凭证/ compartment 问题。移除元素后索引要回退一格，否则会跳过一个 AD。
+- **iptables 默认策略是 ACCEPT + 链尾 REJECT 兜底**，放行规则必须插在 REJECT 之前（`-I <行号>`，不是 `-A`）。v6 原本没有兜底，补建时要在放行规则之后。
+- **ICMPv6 不是可选优化**，它承担邻居发现（等价 IPv4 的 ARP）、PMTUD、SLAAC 重复地址检测。抄 v4 的 `-p icmp` 加 REJECT 兜底可能让 IPv6 整体中断，必须显式放行 `-p ipv6-icmp`。
+- **Docker 自建的 `DOCKER-*` 链不要写进持久化文件**，Docker 会自行管理，写进去会与之争抢规则。
 - **旧版 OCI CLI（3.9x）**：`list` 空结果输出零字节而非 `{"data":[]}`；非空时往 stderr 打印分页 WARNING（脚本里不要用 `2>&1` 合并进结果）；`ipv6-addresses` 返回字符串列表而非字典列表；`compute image list` 必须带 `--compartment-id`；`bv boot-volume delete` 可能静默失败（rc=0 但无效），必要时改用 Python SDK。
 - **Ubuntu 26.04 已上架 OCI**，但第三方软件源仍在追赶期；生产建议继续用 24.04。
 
