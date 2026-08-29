@@ -75,7 +75,7 @@ elif [ "$DRY_RUN" -eq 1 ]; then
 else
     IGW_ID=$(oci network internet-gateway create \
         --compartment-id "$COMPARTMENT_ID" --vcn-id "$VCN_ID" \
-        --display-name "igw-internet" --enabled true \
+        --display-name "igw-internet" --is-enabled true \
         --query 'data.id' --raw-output) || { say "❌ IGW 创建失败"; exit 1; }
     [ -n "$IGW_ID" ] || { say "❌ IGW 创建失败"; exit 1; }
     say "IGW 创建成功: $IGW_ID"
