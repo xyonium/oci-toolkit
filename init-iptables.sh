@@ -74,6 +74,30 @@ PORTS=(
     "-p tcp -m state --state NEW -m tcp --dport 80"
 )
 
+# ─── DHCPv6：必须在 v6 的 REJECT 兜底生效前放行 ───────────────────────────────
+# OCI 的 IPv6 靠 systemd-networkd 的 DHCPv6 从元数据服务获取（日志里是
+# "DHCPv6 address .../128 acquired"）。链路是：
+#   本机 546  →  服务器 547（请求）
+#   服务器 547  →  本机 546（回应，这是入站方向，会被 INPUT 链过滤）
+#
+# ⚠️ 我曾漏掉这两个端口：JP 的 v4 规则里没有它们（v4 用 DHCP 且走 link-local
+#    广播，不经过同样的过滤路径），照抄时自然不会带上。而 546 不在
+#    "9993:65535" 这个高位段里 —— 它是低位端口，所以确实被 REJECT 兜底拦掉。
+#
+# 后果：加了 v6 REJECT 兜底后，实例重启就再也拿不到 IPv6 地址。
+#    实测时间线完全吻合：UK2 在 05:54 拿到地址（当时还没有 v6 兜底），
+#    UK1 在 14:29 重启时拿不到（那时兜底已生效）。
+#    更危险的是这不会立刻暴露 —— 已有租约还能用到期（OCI 给 1 天），
+#    等续租时才断，故障会延迟最多 24 小时才显现。
+#
+# 源地址限定为链路本地范围 fe80::/10 与 OCI 元数据服务，避免对公网敞开。
+# 但 OCI 的 DHCPv6 回应来自 fe80::200:17ff:fe7b:e31d（VNIC 的虚拟路由器），
+# 所以按 fe80::/10 放行即可覆盖，同时不放开 ::/0。
+DHCPV6_RULES=(
+    "-p udp -m udp --sport 547 --dport 546 -s fe80::/10"
+    "-p udp -m udp --dport 546 -s fe80::/10"
+)
+
 # v6 需要补建的基础骨架（UK 的 v4 已有等价物，v6 完全没有）
 BASE_V6=(
     "-m state --state RELATED,ESTABLISHED"
@@ -295,6 +319,8 @@ echo "  ── ICMPv6（按 RFC 4890 §4.4.1 逐 type 放行）──"
 for t in "${ICMPV6_TYPES[@]}"; do
     ensure_accepts ip6tables "-p ipv6-icmp --icmpv6-type $t" || exit 1
 done
+echo "  ── DHCPv6（v6 专属，否则重启后拿不到 IPv6 地址）──"
+ensure_accepts ip6tables "${DHCPV6_RULES[@]}" || exit 1
 echo "  ── v6 端口规则 ──"
 ensure_accepts ip6tables "${PORTS[@]}" || exit 1
 echo "  ── 收紧 ICMPv6（移除过宽的全放行规则）──"
@@ -372,7 +398,7 @@ for target in "${HOSTS[@]}"; do
     fi
 
     {
-        declare -p PORTS BASE_V6 ICMPV6_TYPES
+        declare -p PORTS BASE_V6 ICMPV6_TYPES DHCPV6_RULES
         printf '%s\n' "$REMOTE_SCRIPT"
     } | ssh "${SSH_OPTS[@]}" "$target" 'sudo -n bash -s' || rc_all=1
     echo
