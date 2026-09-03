@@ -154,6 +154,7 @@ oci-toolkit/
 ├── launch-vm.sh          # 按最新 LTS 镜像开机（x86 即时 / ARM 多 AD 轮询）
 ├── init-iptables.sh      # 迁移 iptables 放行规则（v4 + v6 对称，幂等，默认 dry-run）
 ├── gather-iptables.sh    # 采集多台主机的 iptables 配置用于对比
+├── check-arm.sh          # 一条命令查看 JP/UK 两个 ARM 轮询的状态与进度
 ├── setup.sh              # 安装 + systemd 服务管理
 ├── docs/                 # 设计文档
 └── README.md
@@ -170,6 +171,8 @@ oci-toolkit/
 - **Docker 自建的 `DOCKER-*` 链不要写进持久化文件**，Docker 会自行管理，写进去会与之争抢规则。
 - **旧版 OCI CLI（3.9x）**：`list` 空结果输出零字节而非 `{"data":[]}`；非空时往 stderr 打印分页 WARNING（脚本里不要用 `2>&1` 合并进结果）；`ipv6-addresses` 返回字符串列表而非字典列表；`compute image list` 必须带 `--compartment-id`；`bv boot-volume delete` 可能静默失败（rc=0 但无效），必要时改用 Python SDK。
 - **Ubuntu 26.04 已上架 OCI**，但第三方软件源仍在追赶期；生产建议继续用 24.04。
+- **引导卷可以热挂到运行中的实例**（`compute volume-attachment attach-paravirtualized-volume`）。实测把 106GB 引导卷只读挂到另一台运行中的 x86 读数据，全程不停机、卷上数据不变；卸载 + detach 后卷回到 `AVAILABLE`，随时可再用于开机。抢救停机实例里的数据时优先走这条路，而不是「从备份恢复新卷」（那要占新的块存储配额）。
+- **抢占 ARM 容量：查询与开机是同一次调用**。`launch_instance` 失败返回 `Out of host capacity`（InternalError），成功即开机 —— 不存在「先查询有容量、再开机」的两步延迟窗口。Terraform/控制台的尝试底层也是同一次 `launch_instance` 调用，不会提高单次成功率；决定成败的是轮询间隔（脚本 200s+0~100s 抖动，实测单次调用约 3s 返回）与别人手动刷控制台拼手速。日志实例：第 1000 次尝试时仍未抢到，属正常水平。
 
 ## License
 
