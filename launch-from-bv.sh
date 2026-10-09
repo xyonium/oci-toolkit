@@ -18,11 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ─── 参数解析 ─────────────────────────────────────────────────────────────────
 DRY_RUN=0
 ONCE=0
+TEST_TG=0
 ENV_FILE="$SCRIPT_DIR/.env"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1 ;;
         --once)    ONCE=1 ;;
+        --test-tg) TEST_TG=1 ;;
         -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *)         ENV_FILE="$1" ;;
     esac
@@ -77,6 +79,17 @@ else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     }
 fi
+
+# ─── Telegram 通知 ────────────────────────────────────────────────────────────
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 任一为空则静默跳过，不影响轮询主流程
+notify_tg() {
+    local text="$1"
+    [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
+    curl -s -m 15 --noproxy '*' -o /dev/null \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${text}" >/dev/null 2>&1 || true
+}
 
 # ─── launch 参数组装 ──────────────────────────────────────────────────────────
 build_launch_cmd() {
@@ -141,7 +154,7 @@ report_instance() {
         case "$state" in
             RUNNING)
                 say "✅ 实例已 RUNNING"
-                local ips
+                # 不加 local：供成功后的 TG 通知使用（REPORT_IPS）
                 ips=$("$OCI_BIN" compute instance list-vnics --instance-id "$instance_id" \
                     --compartment-id "$COMPARTMENT_ID" \
                     --auth api_key --output json 2>/dev/null | python3 -c '
@@ -185,6 +198,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
+if [ "$TEST_TG" -eq 1 ]; then
+    say "=== 测试 Telegram 通知 ==="
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+        notify_tg "✅ 测试消息（$(hostname)）：TG 通知已配置成功"
+        say "已发送测试消息到 chat_id=${TELEGRAM_CHAT_ID}（请查收；收不到就检查 token/chat id/网络）"
+    else
+        say "⚠️ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未配置，通知将静默跳过"
+    fi
+    exit 0
+fi
+
 # 成功标记：已抢到容量并创建过实例后，不再重复启动（gpu 重启/服务重拉时兜底）
 # 删除该文件可重新进入轮询：rm ~/oci-arm-relaunch/logs/.success
 SUCCESS_FLAG="$LOG_DIR/.success"
@@ -199,6 +223,33 @@ say "引导卷: $BOOT_VOLUME_ID"
 say "可用域: $TARGET_AD   规格: $SHAPE ($OCPUS OCPU / ${MEMORY_GB}GB)"
 say "轮询间隔: ${RETRY_INTERVAL}s + 0~${JITTER}s 随机抖动"
 
+# ─── launch 前预检：租户里已有存活 A1 就停（hitrov 模式）─────────────────────
+# 防的是 .success 标记丢失（重装/日志目录被清）后重复开机——API 查询租户真实
+# 状态，比文件标记可靠。查询失败按 0 处理、不阻塞轮询（宁可多查，不可停摆）。
+count_running_a1() {
+    local n
+    n=$("$OCI_BIN" compute instance list --compartment-id "$COMPARTMENT_ID" \
+        --output json 2>/dev/null | SHAPE="$SHAPE" python3 -c '
+import sys, os
+raw = sys.stdin.read().strip()
+if not raw:          # 旧版 CLI 空结果返回零字节 = 没有实例
+    print(0); sys.exit(0)
+try:
+    d = json.loads(raw)
+    while isinstance(d, dict) and "data" in d:
+        d = d["data"]
+    shape = os.environ.get("SHAPE", "VM.Standard.A1.Flex")
+    alive = [v for v in d
+             if isinstance(v, dict)
+             and (v.get("lifecycle-state") or "") not in ("TERMINATED", "TERMINATING")
+             and (v.get("shape") or "") == shape]
+    print(len(alive))
+except Exception:
+    print(0)
+' 2>/dev/null) || n=0
+    echo "${n:-0}"
+}
+
 attempt=0
 consecutive_429=0
 base=$RETRY_INTERVAL
@@ -206,6 +257,21 @@ base=$RETRY_INTERVAL
 while true; do
     attempt=$((attempt + 1))
     say "--- 第 $attempt 次尝试 ---"
+
+    # 预检：首查 + 每 10 次复查；心跳：每 HEARTBEAT_EVERY 次报平安（0 关闭，默认 300 ≈ 21h）
+    if [ $((attempt % 10)) -eq 1 ]; then
+        n_a1=$(count_running_a1)
+        if [ "$n_a1" -ge "${A1_MAX_INSTANCES:-1}" ]; then
+            say "🛑 A1 预检：已有 $n_a1 个存活 $SHAPE（上限 ${A1_MAX_INSTANCES:-1}），停止轮询"
+            notify_tg "🛑 A1 预检（$(hostname)）：已有 $n_a1 个存活 $SHAPE，停止轮询（若非预期请人工检查）"
+            exit 0
+        fi
+    fi
+    hb="${HEARTBEAT_EVERY:-300}"
+    if [ "$hb" -gt 0 ] && [ $((attempt % hb)) -eq 0 ]; then
+        say "💌 心跳：已尝试 $attempt 次，仍容量不足，服务正常"
+        notify_tg "💌 甲骨文抢机心跳（$(hostname)）：已轮询 $attempt 次，仍容量不足，服务正常"
+    fi
 
     out=$("$OCI_BIN" compute instance launch \
         --compartment-id "$COMPARTMENT_ID" \
@@ -229,6 +295,9 @@ while true; do
         report_instance "$instance_id"
         # 落成功标记：服务再被拉起时直接退出，不会重复开机
         printf '%s\n' "$instance_id" > "$SUCCESS_FLAG"
+        notify_tg "🎉 OCI ARM 容量到手（$(hostname)）
+实例: $INSTANCE_NAME（原引导卷复开）
+${REPORT_IPS:-（IP 获取失败，看日志）}"
         say "=== 脚本结束（服务将转为 inactive）==="
         exit 0
     fi
@@ -263,6 +332,9 @@ else:
             ;;
         STOP)
             say "❌ 不可重试错误，脚本终止: $brief"
+            notify_tg "🛑 甲骨文抢机轮询终止（$(hostname)）
+错误: $brief
+需人工检查服务日志"
             say "=== 完整输出 ==="
             printf '%s\n' "$out" | tail -20
             exit 1
