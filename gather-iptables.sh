@@ -5,6 +5,7 @@
 # 用法: ./gather-iptables.sh [user@]host ...
 #   例: ./gather-iptables.sh ubuntu@oraclejp.example.com ubuntu@oraclejp-2.example.com \
 #                            ubuntu@203.0.113.10 ubuntu@203.0.113.11
+#   无参数时读取脚本旁 .env 里的 GATHER_IPTABLES_TARGETS（空格分隔，.env 不入库）
 #
 # 输出目录: ./iptables-dump/<host>/
 #   meta.txt            主机名/系统/文件大小/持久化服务状态
@@ -21,10 +22,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/iptables-dump}"
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    . "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 if [ $# -eq 0 ]; then
-    echo "用法: $0 [user@]host ..." >&2
-    echo "示例: $0 ubuntu@oraclejp.example.com ubuntu@203.0.113.10" >&2
-    exit 2
+    if [ -n "${GATHER_IPTABLES_TARGETS:-}" ]; then
+        read -ra _targets <<< "$GATHER_IPTABLES_TARGETS"
+        set -- "${_targets[@]}"
+    else
+        echo "用法: $0 [user@]host ..." >&2
+        echo "  或在 .env 中设置 GATHER_IPTABLES_TARGETS=\"ubuntu@host1 ubuntu@host2\"" >&2
+        echo "示例: $0 ubuntu@oraclejp.example.com ubuntu@203.0.113.10" >&2
+        exit 2
+    fi
 fi
 
 mkdir -p "$OUT_DIR" || { echo "错误: 无法创建输出目录 $OUT_DIR" >&2; exit 1; }
