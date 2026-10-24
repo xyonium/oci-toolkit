@@ -112,19 +112,70 @@ cp .env.uk.example .env   # 场景二：新租户搭双栈网络 + 开新机
 tail -f logs/launch.log
 ```
 
+## 获取 OCI API 凭据（推荐网页生成）
+
+直接在 OCI 控制台生成 API Key 即可，**不需要先运行 `oci setup config`，也不需要分别查找 User OCID、Tenancy OCID 和 fingerprint**。添加 API Key 后，控制台会自动生成包含这些字段的配置文件片段。
+
+### 1. 在控制台生成密钥对
+
+1. 登录 [OCI 控制台](https://cloud.oracle.com/)，进入 **右上角头像 → 用户设置 / User settings → 令牌和密钥 / Token and keys**（部分界面显示为 **API Keys**）。
+2. 点击 **Add API Key**，选择 **Generate API Key Pair / 生成 API 密钥对**。
+3. 按页面提示**下载私钥**；公钥可按需下载，控制台会登记与私钥对应的公钥，无需再手动上传。
+4. 点击 **Add**，复制页面给出的 **Configuration File Preview / 配置文件片段**。
+
+私钥通常只能在生成时下载，之后无法从控制台重新取回。请妥善保存，不要提交到 Git 或发给他人；如果丢失，需要重新创建 API Key。
+
+### 2. 保存私钥并写入 config
+
+把下载的私钥安全地放到**实际运行脚本的 Linux 主机**上，例如 `~/.oci/oci_api_key.pem`。如果私钥下载到了另一台电脑，先安全复制到这台主机。
+
+将控制台自动生成的配置片段写入 `~/.oci/config`。首次配置使用 `[DEFAULT]`，例如：
+
+```ini
+[DEFAULT]
+user=ocid1.user.oc1..网页自动生成的值
+fingerprint=网页自动生成的值
+tenancy=ocid1.tenancy.oc1..网页自动生成的值
+region=us-phoenix-1
+key_file=/home/你的用户名/.oci/oci_api_key.pem
+```
+
+`user`、`fingerprint`、`tenancy`、`region` **全部沿用网页自动生成的值**。通常只需要把 `key_file` 改为本机私钥的实际绝对路径，确保路径和 `.pem` 文件名与保存的私钥一致。
+
+设置文件权限（私钥文件名按实际情况调整）：
+
+```bash
+mkdir -p ~/.oci
+chmod 700 ~/.oci
+chmod 600 ~/.oci/config
+chmod 600 ~/.oci/oci_api_key.pem
+```
+
+### 3. 验证凭据
+
+在项目目录执行只读查询：
+
+```bash
+./venv/bin/oci --profile DEFAULT --auth api_key os ns get
+```
+
+能返回 Object Storage namespace，即表示 API Key 认证和 config 均已生效。
+
 ### 多租户
 
-凭据用 OCI CLI 的 INI 多 profile 共存，互不干扰：
+凭据用 OCI CLI 的 INI 多 profile 共存，互不干扰。新增租户时，把网页生成的配置片段**追加**到现有 `~/.oci/config`，将新片段的段名从 `[DEFAULT]` 改为 `[UK]`，并让 `.env` 使用相同的 `OCI_PROFILE=UK`：
 
 ```ini
 # ~/.oci/config
-[DEFAULT]      # 旧租户
-[uk]           # 新租户 —— 脚本里 OCI_PROFILE=uk
+[DEFAULT]      # 旧租户，原有内容保持不变
+[UK]           # 新租户 —— .env 里 OCI_PROFILE=UK
 ```
 
-新私钥用**新文件名**（如 `uk_api_key.pem`），不要覆盖旧租户的 `.pem`。
+新片段中自动生成的认证字段仍然照抄，只需让 `key_file` 指向本次下载的新私钥。新私钥使用**新文件名**（如 `uk_api_key.pem`），不要覆盖旧租户的 profile 或 `.pem`。验证时将命令中的 `--profile DEFAULT` 换成 `--profile UK`。
 
-## 需要准备的 OCID
+## 需要准备的资源 OCID
+
+以下资源参数不包含在 API Key 自动生成的认证配置中，仍需按场景填写：
 
 | 变量 | 获取方式 |
 |---|---|
@@ -133,7 +184,7 @@ tail -f logs/launch.log
 | `TARGET_AD` | 引导卷详情页的「可用性域」，必须与卷完全一致 |
 | `SUBNET_ID` | 网络 → 虚拟云网络 → 子网 → 复制 OCID |
 
-凭据：`oci setup config` 生成 `~/.oci/config` + API Key（控制台 → 用户设置 → API 密钥）。
+参考：[Oracle 官方：API Signing Key](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm)。
 
 ## 背景：2026 免费层限额变更
 
