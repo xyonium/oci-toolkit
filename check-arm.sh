@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# check-arm.sh — 查看两台 ARM 容量轮询的当前状态（JP 与 UK，均运行在 gpu 上）
+# check-arm.sh — 查看三台 ARM 容量轮询的当前状态（JP / UK / ZYUSPH，均运行在 gpu 上）
 #
 # 用法: ./check-arm.sh              # 一次性查看
 #       ./check-arm.sh --follow     # 持续跟踪 UK 日志（Ctrl-C 退出）
 #
-# 两台轮询都跑在 gpu (ssh eli@gpu) 上，是不同的 systemd user 服务：
+# 三台轮询都跑在 gpu (ssh eli@gpu) 上，是不同的 systemd user 服务：
 #   oci-arm-relaunch  → JP(ap-osaka-1)，基于 106GB 保留引导卷重开 A1.Flex
 #   oci-uk-arm        → UK(uk-london-1)，用最新 Ubuntu 24.04 镜像新建 A1.Flex
+#   oci-zyusph-arm    → ZYUSPH(us-phoenix-1)，用最新 Ubuntu 24.04 镜像新建 A1.Flex
 #
 # 退出码: 0=至少一台已成功拿到实例 / 1=都还在轮询 / 2=服务异常或无法连接
 
@@ -23,18 +24,30 @@ fi
 
 ssh -o BatchMode=yes -o ConnectTimeout=15 "$GPU_HOST" 'bash -s' <<'REMOTE'
 rc_bad=0
-for pair in "oci-arm-relaunch:JP(ap-osaka-1):~/oci-arm-relaunch" "oci-uk-arm:UK(uk-london-1):~/oci-uk"; do
+for pair in "oci-arm-relaunch:JP(ap-osaka-1):~/oci-arm-relaunch" "oci-uk-arm:UK(uk-london-1):~/oci-uk" "oci-zyusph-arm:ZYUSPH(us-phoenix-1):~/oci-zyusph"; do
     svc="${pair%%:*}"; rest="${pair#*:}"; label="${rest%%:*}"; dir="${rest#*:}"
     dir="${dir/#\~/$HOME}"
 
     echo "════════ $label — 服务 $svc ════════"
+
+    # 成功标记
+    flag=""
+    for f in "$dir/logs/.success-vm-arm" "$dir/logs/.success" "$dir/.success"; do
+        [ -f "$f" ] && { flag="$f"; break; }
+    done
 
     state=$(systemctl --user is-active "$svc" 2>/dev/null)
     enabled=$(systemctl --user is-enabled "$svc" 2>/dev/null)
     case "$state" in
         active)   echo "  状态: ✅ active（$enabled）" ;;
         failed)   echo "  状态: ❌ FAILED ← 需要人工介入"; rc_bad=1 ;;
-        inactive) echo "  状态: ⚠️  inactive（未运行）"; rc_bad=1 ;;
+        inactive)
+            if [ -n "$flag" ]; then
+                echo "  状态: ✅ inactive（已成功收工，$enabled）"
+            else
+                echo "  状态: ⚠️  inactive（未运行）"; rc_bad=1
+            fi
+            ;;
         *)        echo "  状态: ❓ $state"; rc_bad=1 ;;
     esac
 
@@ -44,11 +57,6 @@ for pair in "oci-arm-relaunch:JP(ap-osaka-1):~/oci-arm-relaunch" "oci-uk-arm:UK(
         [ -n "$since" ] && echo "  启动于: $since"
     fi
 
-    # 成功标记
-    flag=""
-    for f in "$dir/logs/.success-vm-arm" "$dir/logs/.success" "$dir/.success"; do
-        [ -f "$f" ] && { flag="$f"; break; }
-    done
     if [ -n "$flag" ]; then
         echo "  🎉 已抢到容量！实例 OCID: $(cat "$flag")"
         rc_ok=1

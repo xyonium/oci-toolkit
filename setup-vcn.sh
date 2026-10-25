@@ -41,30 +41,55 @@ command -v python3 >/dev/null 2>&1 || { echo "错误: 需要 python3" >&2; exit 
 oci() { "$OCI_BIN" --profile "$PROFILE" --auth api_key "$@"; }
 say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
-# ─── 发现 default VCN / RT / SL ──────────────────────────────────────────────
+# ─── 发现或创建 default VCN / RT / SL ────────────────────────────────────────
 VCN_ID="${VCN_ID:-}"
 if [ -z "$VCN_ID" ]; then
-    VCN_ID=$(oci network vcn list --compartment-id "$COMPARTMENT_ID" --output json --all | python3 -c '
+    VCN_ID=$(oci network vcn list --compartment-id "$COMPARTMENT_ID" --output json --all 2>/dev/null | python3 -c '
 import sys, json
-d = json.load(sys.stdin)["data"]
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+d = json.loads(raw).get("data") or []
 pref = [v for v in d if "default" in (v.get("display-name") or "").lower()]
 print((pref or d)[0]["id"] if d else "")
 ' 2>/dev/null || echo "")
-    [ -n "$VCN_ID" ] || { say "❌ 未找到任何 VCN"; exit 1; }
 fi
-VCN_JSON=$(oci network vcn get --vcn-id "$VCN_ID" --output json) || { say "❌ 读取 VCN 信息失败"; exit 1; }
+
+if [ -z "$VCN_ID" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "[dry-run] 未找到任何 VCN，将创建双栈 VCN: default-vcn (10.0.0.0/16 + IPv6 /56)"
+        say "[dry-run] 随后将创建 IGW、双栈默认路由、43 条入站安全列表及双栈 default-subnet (10.0.0.0/24 + /64)"
+        exit 0
+    fi
+    say "未找到任何 VCN，正在创建双栈 VCN (default-vcn, 10.0.0.0/16 + IPv6)..."
+    VCN_ID=$(oci network vcn create \
+        --compartment-id "$COMPARTMENT_ID" \
+        --display-name "default-vcn" \
+        --dns-label "defaultvcn" \
+        --cidr-blocks '["10.0.0.0/16"]' \
+        --is-ipv6-enabled true \
+        --query 'data.id' --raw-output 2>/dev/null) || { say "❌ VCN 创建失败"; exit 1; }
+    [ -n "$VCN_ID" ] && [ "$VCN_ID" != "null" ] || { say "❌ VCN 创建失败"; exit 1; }
+    say "✅ VCN 创建成功: $VCN_ID"
+fi
+
+VCN_JSON=$(oci network vcn get --vcn-id "$VCN_ID" --output json 2>/dev/null) || { say "❌ 读取 VCN 信息失败"; exit 1; }
 RT_ID=$(printf '%s' "$VCN_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["default-route-table-id"])')
 SL_ID=$(printf '%s' "$VCN_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["default-security-list-id"])')
+VCN_IPV6_CIDR=$(printf '%s' "$VCN_JSON" | python3 -c 'import sys,json; b=json.load(sys.stdin)["data"].get("ipv6-cidr-blocks") or []; print(b[0] if b else "")')
 [ -n "$RT_ID" ] && [ -n "$SL_ID" ] || { say "❌ 解析 VCN JSON 失败"; exit 1; }
-say "VCN: $VCN_ID"
+say "VCN: $VCN_ID (IPv6: ${VCN_IPV6_CIDR:-none})"
 say "RT:  $RT_ID"
 say "SL:  $SL_ID"
 
 # ─── 1. Internet Gateway ─────────────────────────────────────────────────────
 IGW_ID=$(oci network internet-gateway list --compartment-id "$COMPARTMENT_ID" \
-    --vcn-id "$VCN_ID" --output json --all | python3 -c '
+    --vcn-id "$VCN_ID" --output json --all 2>/dev/null | python3 -c '
 import sys, json
-d = json.load(sys.stdin)["data"]
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+d = json.loads(raw).get("data") or []
 print(d[0]["id"] if d else "")
 ' 2>/dev/null || echo "")
 if [ -n "$IGW_ID" ]; then
@@ -147,7 +172,13 @@ def rule(proto, is_udp, pmin, pmax, src, desc):
         r["udp-options" if is_udp else "tcp-options"] = {"destination-port-range": {"min": pmin, "max": pmax}}
     return r
 
-want = []
+want = [
+    # 确保双栈基础 SSH 与 ICMPv6 PMTUD 规则存在（CLI 新建 VCN 时默认 SL 可能仅含 IPv4 基础规则）
+    rule(6, False, 22, 22, "0.0.0.0/0", None),
+    rule(6, False, 22, 22, "::/0", None),
+    {"protocol": "1",  "source": "0.0.0.0/0", "source-type": "CIDR_BLOCK", "description": None, "icmp-options": {"type": 3, "code": 4}},
+    {"protocol": "58", "source": "::/0",      "source-type": "CIDR_BLOCK", "description": None, "icmp-options": {"type": 2, "code": 0}},
+]
 for proto, is_udp, pmin, pmax, d4, d6 in GROUPS:
     want.append(rule(proto, is_udp, pmin, pmax, "0.0.0.0/0", d4))
     want.append(rule(proto, is_udp, pmin, pmax, "::/0", d6))
@@ -156,11 +187,17 @@ def key(r):
     o = r.get("tcp-options") or r.get("udp-options") or {}
     dp = o.get("destination-port-range") or {}
     ic = r.get("icmp-options") or {}
-    return (r.get("protocol"), r.get("source"), dp.get("min"), dp.get("max"), ic.get("type"), ic.get("code"))
+    return (str(r.get("protocol")), r.get("source"), dp.get("min"), dp.get("max"), ic.get("type"), ic.get("code"))
 
 have = {key(r) for r in ing}
 added = [r for r in want if key(r) not in have]
 ing.extend(added)
+
+eg_have = {(str(r.get("protocol")), r.get("destination")) for r in eg}
+for dest in ("0.0.0.0/0", "::/0"):
+    if ("all", dest) not in eg_have:
+        eg.append({"protocol": "all", "destination": dest, "destination-type": "CIDR_BLOCK", "is-stateless": False})
+
 json.dump({"ingress-security-rules": ing, "egress-security-rules": eg}, sys.stdout)
 print("ADDED=%d TOTAL_INGRESS=%d TOTAL_EGRESS=%d" % (len(added), len(ing), len(eg)), file=sys.stderr)
 ' > "$MERGED_FILE" 2>"$SL_SUMMARY_FILE" || { say "❌ 规则合并失败"; cat "$SL_SUMMARY_FILE" >&2; exit 1; }
@@ -169,7 +206,7 @@ say "安全列表合并: $SUMMARY"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     say "[dry-run] 将用合并后的完整规则数组执行 oci network security-list update（已存在规则不重复）"
-elif [ "$(printf '%s' "$SUMMARY" | sed -n 's/^ADDED=\([0-9]*\).*/\1/p')" = "0" ]; then
+elif [ "$(printf '%s' "$SUMMARY" | sed -n 's/^ADDED=\([0-9]*\).*/\1/p')" = "0" ] && [ "$(printf '%s' "$SUMMARY" | sed -n 's/.*TOTAL_EGRESS=\([0-9]*\).*/\1/p')" -ge 2 ]; then
     say "无新增规则，跳过 update"
 else
     oci network security-list update --security-list-id "$SL_ID" \
@@ -178,4 +215,49 @@ else
     say "✅ 安全列表已更新"
 fi
 
-say "=== 完成。SUBNET 自动发现见: oci network subnet list --compartment-id <tenancy> --vcn-id $VCN_ID ==="
+# ─── 4. 子网：发现或自动创建双栈 default-subnet ─────────────────────────────
+SUBNET_ID="${SUBNET_ID:-}"
+if [ -z "$SUBNET_ID" ]; then
+    SUBNET_ID=$(oci network subnet list --compartment-id "$COMPARTMENT_ID" \
+        --vcn-id "$VCN_ID" --output json --all 2>/dev/null | python3 -c '
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+d = json.loads(raw).get("data") or []
+pref = [s for s in d if "default" in (s.get("display-name") or "").lower()]
+print((pref or d)[0]["id"] if d else "")
+' 2>/dev/null || echo "")
+fi
+
+if [ -n "$SUBNET_ID" ]; then
+    say "Subnet 已存在: $SUBNET_ID"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    say "[dry-run] 将创建双栈 Regional 子网: default-subnet (10.0.0.0/24 + IPv6 /64)"
+else
+    SUBNET_IPV6_CIDR=$(printf '%s' "$VCN_IPV6_CIDR" | python3 -c '
+import sys, ipaddress
+s = sys.stdin.read().strip()
+if s:
+    net = ipaddress.IPv6Network(s, strict=False)
+    print(str(next(net.subnets(new_prefix=64))))
+')
+    [ -n "$SUBNET_IPV6_CIDR" ] || { say "❌ 无法从 VCN IPv6 CIDR ($VCN_IPV6_CIDR) 派生 /64 子网"; exit 1; }
+    say "正在创建双栈 Regional 子网 (10.0.0.0/24 + $SUBNET_IPV6_CIDR)..."
+    SUBNET_ID=$(oci network subnet create \
+        --compartment-id "$COMPARTMENT_ID" \
+        --vcn-id "$VCN_ID" \
+        --display-name "default-subnet" \
+        --dns-label "defaultsubnet" \
+        --cidr-block "10.0.0.0/24" \
+        --ipv6-cidr-block "$SUBNET_IPV6_CIDR" \
+        --prohibit-public-ip-on-vnic false \
+        --prohibit-internet-ingress false \
+        --route-table-id "$RT_ID" \
+        --security-list-ids "[\"$SL_ID\"]" \
+        --query 'data.id' --raw-output 2>/dev/null) || { say "❌ 子网创建失败"; exit 1; }
+    [ -n "$SUBNET_ID" ] && [ "$SUBNET_ID" != "null" ] || { say "❌ 子网创建失败"; exit 1; }
+    say "✅ 子网创建成功: $SUBNET_ID"
+fi
+
+say "=== 完成。SUBNET_ID=$SUBNET_ID ==="
