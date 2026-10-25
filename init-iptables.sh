@@ -46,14 +46,17 @@
 set -uo pipefail
 
 DRY_RUN=1
+JUMP_HOST=""
 HOSTS=()
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --apply)   DRY_RUN=0 ;;
         --dry-run) DRY_RUN=1 ;;
+        -J)        shift; JUMP_HOST="${1:-}" ;;
         -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
-        *)         HOSTS+=("$arg") ;;
+        *)         HOSTS+=("$1") ;;
     esac
+    shift
 done
 
 if [ ${#HOSTS[@]} -eq 0 ]; then
@@ -189,7 +192,10 @@ sudo -n ip6tables -X "$TESTCHAIN" 2>/dev/null
 VALIDATE
 }
 
-SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15)
+if [ -n "$JUMP_HOST" ]; then
+    SSH_OPTS+=(-o "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -W %h:%p $JUMP_HOST")
+fi
 
 # 远端主体。规则数组以 declare -p 序列化后随脚本一同从 stdin 注入，
 # 规避 ssh 嵌套引号问题（曾因嵌套单引号破坏 python 的 ['data'] 取值）。
@@ -229,7 +235,9 @@ ensure_accepts() {
         if [ -n "$reject_line" ]; then
             $cmd -I INPUT "$reject_line" $args -j ACCEPT \
                 || { echo "     ❌ 添加失败: $args"; return 1; }
-            echo "     ✅ 插入 REJECT 前(第 $reject_line 行): $args"
+            # 每次插入后重新计算 REJECT 行号，保证 PORTS 数组内的相对顺序不被反转
+            reject_line=$((reject_line + 1))
+            echo "     ✅ 插入 REJECT 前: $args"
         else
             $cmd -A INPUT $args -j ACCEPT \
                 || { echo "     ❌ 添加失败: $args"; return 1; }
