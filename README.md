@@ -81,7 +81,20 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 
 输出到 `iptables-dump/<host>/`：持久化文件的**字节数与规则条数**（用于判断 rules.v6 是否真为空）、磁盘上的 `rules.v4`/`rules.v6`、内核里实际生效的 live 规则（能看出有无未保存改动）、接口地址（识别绑定私有 IP 的规则）。对比新旧主机时的第一步。
 
-### 6. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
+### 6. `optimize-oracle-vps.sh` — E2.1.Micro (1GB) 系统级优化（幂等）
+
+```bash
+./optimize-oracle-vps.sh ubuntu@<host> [...]          # 默认 dry-run
+./optimize-oracle-vps.sh ubuntu@<host> ... --apply    # 实际执行
+```
+
+优化项（详见脚本头部注释的实测根因）：oracle-cloud-agent snap 旧修订版清理；journald 上限 100M（防 `podman logs` 全量扫描数 GB 日志冲垮 Page Cache）；最小包集合（purge dlocate/dctrl-tools/supercat）；`vm.swappiness=10` + 冷 SwapCached 回收；**mask `fwupd`/`fwupd-refresh.timer`/`multipathd`**（OCI 虚拟机内无可刷写固件——固件/微码由 Oracle 宿主机侧维护，Ubuntu 官方 cloud image 亦已移除 fwupd；单路径 iSCSI 根盘无 multipath 管理对象；两者合计常驻 ~60MB，JP/UK 已跨重启验证无影响）；**创建 512MB `/swapfile` 并写入 fstab**（1GB 微机内存兜底，已挂载则跳过、fstab 缺条目则补写）。
+
+### 7. `setup-podman.sh` — Podman 容器环境标准化（严格前置校验 + 幂等）
+
+脏状态（Docker 残留链/不纯的 rules.v4/v6）一律 fail-fast 报错，绝不盲目自动拼接；通过后安装 Podman + crun + podman-compose 并固化 `00-shortnames.conf`。
+
+### 8. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
 
 TODO：定期把指定引导卷备份/复制到另一个区域，异地容灾。
 
@@ -205,7 +218,9 @@ oci-toolkit/
 ├── launch-vm.sh          # 按最新 LTS 镜像开机（x86 即时 / ARM 多 AD 轮询）
 ├── init-iptables.sh      # 迁移 iptables 放行规则（v4 + v6 对称，幂等，默认 dry-run）
 ├── gather-iptables.sh    # 采集多台主机的 iptables 配置用于对比
-├── check-arm.sh          # 一条命令查看 JP/UK 两个 ARM 轮询的状态与进度
+├── optimize-oracle-vps.sh # E2.1.Micro 系统级优化（journald/swappiness/mask 无用服务/swapfile）
+├── setup-podman.sh       # Podman 环境标准化（fail-fast 前置校验 + 幂等）
+├── check-arm.sh          # 一条命令查看 JP/UK/ZYUSPH 三个 ARM 轮询的状态与进度
 ├── setup.sh              # 安装 + systemd 服务管理
 ├── docs/                 # 设计文档
 └── README.md

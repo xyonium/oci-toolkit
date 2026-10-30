@@ -20,6 +20,15 @@
 #   4. 虚拟内存参数与残留冷 SwapCached 回收:
 #      保持 vm.swappiness=10；当 MemAvailable > 350MB 且 SwapUsed > 0 时，自动执行
 #      swapoff -a && swapon -a 将跨版本升级遗留的冷 SwapCached 页收回物理内存。
+#   5. mask fwupd / fwupd-refresh.timer / multipathd:
+#      OCI 虚拟机内 fwupd 只能看到 QEMU 虚拟主板/虚拟 SCSI 盘/vCPU，无任何可刷写固件
+#      （固件与微码由 Oracle 宿主机侧维护；Ubuntu 官方 cloud image 亦已移除 fwupd），
+#      但 fwupd-refresh.timer 每天唤醒一次常驻 ~34MB。multipathd 对单路径 iSCSI 根盘
+#      （/dev/sda 直挂，multipath -ll 无 map）无管理对象，常驻 ~26MB。两者合计 ~60MB，
+#      2026-10-15/16 已在 JP/UK 手工 mask 并跨重启验证无影响，此处固化为脚本步骤。
+#   6. 512MB /swapfile（fstab 持久化）:
+#      1GB 微机的内存兜底；JP/UK 已于 2026-10-15/16 手工创建，本次起对全部主机统一。
+#      已挂载则跳过；已挂载但 fstab 缺条目则补写。根分区余量不足 1GB 时跳过并告警。
 
 set -uo pipefail
 
@@ -178,6 +187,66 @@ if [ "$swap_used_kb" -gt 10240 ] && [ "$mem_avail_kb" -gt 350000 ]; then
     fi
 else
     echo "     ○ MemAvailable=$((mem_avail_kb / 1024))MB, SwapUsed=$((swap_used_kb / 1024))MB (无需回收)"
+fi
+
+# 5. mask fwupd / fwupd-refresh.timer / multipathd（OCI VM 无可刷固件、单路径根盘无 multipath 对象）
+echo
+echo "  ── 5. 禁用无用常驻服务 (fwupd / fwupd-refresh / multipathd) ──"
+for unit in fwupd.service fwupd-refresh.timer multipathd.service; do
+    unit_state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+    case "$unit_state" in
+        masked)
+            echo "     ○ $unit 已 masked"
+            continue
+            ;;
+        not-found|"")
+            echo "     ○ $unit 不存在，跳过"
+            continue
+            ;;
+    esac
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "     + [dry-run] 将 mask 并停止: $unit (当前 $unit_state)"
+    else
+        systemctl mask --now "$unit" >/dev/null 2>&1 || true
+        echo "     ✅ 已 mask 并停止: $unit"
+        CHANGED=$((CHANGED + 1))
+    fi
+done
+
+# 6. 512MB /swapfile（1GB 微机内存兜底，对齐 JP/UK；fstab 持久化）
+echo
+SWAP_SIZE_MB=512
+echo "  ── 6. Swap 文件 (${SWAP_SIZE_MB}MB) ──"
+if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "/swapfile"; then
+    echo "     ○ /swapfile 已挂载: $(swapon --show=SIZE,USED --noheadings /swapfile 2>/dev/null)"
+else
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "     + [dry-run] 将创建并挂载 /swapfile (${SWAP_SIZE_MB}MB) 并写入 fstab"
+    else
+        disk_avail_mb=$(df -m --output=avail / | tail -1 | tr -d " ")
+        if [ "${disk_avail_mb:-0}" -lt $((SWAP_SIZE_MB + 512)) ]; then
+            echo "     ⚠️ 根分区可用 ${disk_avail_mb}MB，不足 ${SWAP_SIZE_MB}MB swap + 512MB 余量，跳过创建"
+        else
+            if [ ! -f /swapfile ]; then
+                fallocate -l "${SWAP_SIZE_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=none
+                chmod 600 /swapfile
+                mkswap /swapfile >/dev/null
+            fi
+            swapon /swapfile
+            echo "     ✅ 已创建并挂载 /swapfile (${SWAP_SIZE_MB}MB)"
+            CHANGED=$((CHANGED + 1))
+        fi
+    fi
+fi
+# fstab 持久化（覆盖「swap 已挂载但 fstab 缺条目」的遗留状态）
+if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "/swapfile" && ! grep -qE "^/swapfile[[:space:]]" /etc/fstab; then
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "     + [dry-run] /swapfile 已挂载但 fstab 缺条目，将补写"
+    else
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+        echo "     ✅ 已补写 fstab 条目"
+        CHANGED=$((CHANGED + 1))
+    fi
 fi
 '
 
