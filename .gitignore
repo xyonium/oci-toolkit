@@ -21,3 +21,6 @@ backups/
 
 # Live migration runbook contains real topology — local only
 wordpress-migration.md
+
+# codegraph 索引（本地生成）
+.codegraph/

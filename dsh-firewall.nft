@@ -1,0 +1,72 @@
+#!/usr/sbin/nft -f
+# dsh_firewall — 代理节点 v4+v6 统一防火墙（白名单 + REJECT 兜底）
+# 适用于 dmit / aliuk / alius 等手工栈迁移后的代理节点
+# 不碰 ip6 filter / rules.v6（inet 表独立于 iptables-nft 转换层）
+# 用法：nft -f dsh-firewall.nft（幂等，重复执行安全）
+
+# 先删旧表（幂等重建）
+table inet dsh_firewall
+delete table inet dsh_firewall
+
+table inet dsh_firewall {
+  # ── 入站白名单 ──
+  chain input {
+    type filter hook input priority filter; policy accept;
+
+    # 本地回环
+    iifname "lo" accept
+
+    # 已建立/相关连接
+    ct state established,related accept
+
+    # SSH
+    tcp dport 22 ct state new accept
+
+    # HTTP（Caddy 反代 + ACME HTTP-01）
+    tcp dport 80 ct state new accept
+
+    # HTTPS（Xray REALITY + Caddy）
+    tcp dport 443 ct state new accept
+
+    # HTTP/3（QUIC）
+    udp dport 443 accept
+
+    # Hysteria2
+    udp dport 8443 accept
+
+    # hy2 端口跳跃
+    udp dport 20000-30000 accept
+
+    # ICMP v4（ping，不限速——后续可加 rate limit）
+    ip protocol icmp accept
+
+    # ICMPv6（按 RFC 4890 §4.4.1 必须放行的 type，用数字最保险）
+    # 1=dest-unreachable 2=packet-too-big 3=time-exceeded 4=parameter-problem
+    # 128/129=echo 133/134=RS/RA 135/136=NS/NA 130/131/132=MLD 143=MLDv2 141/142=IND
+    icmpv6 type { 1, 2, 3, 4, 128, 129, 133, 134, 135, 136, 130, 131, 132, 143, 141, 142 } accept
+
+    # DHCPv6（v6 地址分配必需）
+    udp sport 547 udp dport 546 ip6 saddr fe80::/10 accept
+    udp dport 546 ip6 saddr fe80::/10 accept
+
+    # 兜底：拒绝一切未匹配流量
+    # v4 用 icmp-host-prohibited，v6 用 icmp6-adm-prohibited
+    ip protocol tcp reject with tcp reset
+    ip protocol udp reject with icmp port-unreachable
+    ip6 nexthdr tcp reject with tcp reset
+    ip6 nexthdr udp reject with icmpv6 port-unreachable
+    reject
+  }
+
+  # ── 转发：代理节点不需要转发 ──
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    ct state established,related accept
+    reject
+  }
+
+  # ── 出站：全放行（代理节点需要自由出站） ──
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

@@ -94,7 +94,52 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 
 脏状态（Docker 残留链/不纯的 rules.v4/v6）一律 fail-fast 报错，绝不盲目自动拼接；通过后安装 Podman + crun + podman-compose 并固化 `00-shortnames.conf`。
 
-### 8. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
+### 8. `init-firewall.sh` — 全机队统一主机防火墙（profile 切换，幂等）
+
+一台机器一份规则，全部收敛到同一个 `table inet dsh_firewall`（白名单 + REJECT 兜底）。
+不写 iptables，**不碰 `ip6 filter` / `/etc/iptables/rules.v6`**——inet 表独立于 iptables-nft
+转换层，与既有的 iptables-persistent / Docker 表天然共存。
+
+```bash
+./init-firewall.sh user@host                      # 默认 dry-run，只打印将生成的规则
+./init-firewall.sh user@host --apply              # 实际下发（先 nft -c 校验，再加载）
+./init-firewall.sh --local --apply                # 在本机执行
+```
+
+按机器角色选 profile，不要每台手改端口：
+
+| profile | 放行 | 用在 |
+|---|---|---|
+| `proxy`（默认） | SSH + 80/tcp + 443/tcp + 443/udp + hy2 + 端口跳跃 | 全家桶节点（Caddy + Xray + hy2） |
+| `hy2` | SSH + hy2 + 端口跳跃 | 只跑 hysteria2 的节点 |
+| `web` | SSH + 80/tcp + 443/tcp + 443/udp | 只跑 Caddy/反代的节点 |
+| `minimal` | 只有 SSH | 跳板机、刚开机还没部署服务 |
+
+端口/服务各有开关，不需要改脚本：
+
+```bash
+--ssh-port 26320                    # SSH 端口（bwg 这类非 22 的机器）
+--hy2-port 9443                     # hy2 监听端口，默认 8443
+--hy2-hop 30000-40000               # 端口跳跃范围，默认 20000-30000
+--no-hy2-hop                        # 关掉跳跃，只留单端口
+--no-http3                          # 不放 443/udp（QUIC）
+--extra-tcp 8080,9090 --extra-udp 53 # 额外端口，可重复，支持 9000-9100 区间
+--enable-frps / --enable-xmpp        # 可选服务组
+```
+
+**默认 profile 生成的规则与现网 `dsh-firewall.nft` 逐条一致**，所以老机器重跑脚本是纯 no-op；
+`tests/test-init-firewall.sh` 把这条钉死成回归测试。
+
+安全细节：
+
+- 端口参数做白名单校验（只允许数字 / 逗号 / 空格 / 区间连字符），越界或注入直接 `exit 2`
+  且**不产出半份规则**——绝不会把半截 accept 列表写进内核。
+- 远端执行顺序是 `nft -c -f` 语法校验 → `nft -f` 加载 → 落盘 `/etc/nftables.d-dsh/firewall.nft`
+  → 补 `/etc/nftables.conf` 的 include 行 → 最后再开一条新 SSH 会话自检，确认没把自己锁在门外。
+- 任何 profile 都保留链尾的 REJECT 兜底（v4 用 tcp reset / icmp port-unreachable，
+  v6 用 adm-prohibited 等价物），并有测试断言它必须是 input 链的最后一条。
+
+### 9. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
 
 TODO：定期把指定引导卷备份/复制到另一个区域，异地容灾。
 
@@ -217,11 +262,14 @@ oci-toolkit/
 ├── setup-vcn.sh          # 幂等补齐 default VCN 的互联网出口与防火墙规则
 ├── launch-vm.sh          # 按最新 LTS 镜像开机（x86 即时 / ARM 多 AD 轮询）
 ├── init-iptables.sh      # 迁移 iptables 放行规则（v4 + v6 对称，幂等，默认 dry-run）
+├── init-firewall.sh      # 统一主机防火墙：nft inet dsh_firewall，profile 切换，v4+v6，默认 dry-run
+├── dsh-firewall.nft      # 上面那个脚本默认 profile 的黄金样本（现网在跑的规则，测试基准）
 ├── gather-iptables.sh    # 采集多台主机的 iptables 配置用于对比
 ├── optimize-oracle-vps.sh # E2.1.Micro 系统级优化（journald/swappiness/mask 无用服务/swapfile）
 ├── setup-podman.sh       # Podman 环境标准化（fail-fast 前置校验 + 幂等）
 ├── check-arm.sh          # 一条命令查看 JP/UK/ZYUSPH 三个 ARM 轮询的状态与进度
 ├── setup.sh              # 安装 + systemd 服务管理
+├── tests/                # dry-run 测试（bash tests/test-init-firewall.sh）
 ├── docs/                 # 设计文档
 └── README.md
 ```
