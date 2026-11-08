@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# optimize-oracle-vps.sh — Oracle Cloud E2.1.Micro (1GB RAM) 系统级优化脚本（幂等）
+# optimize-oracle-vps.sh — Linux VPS 系统级优化脚本（幂等，兼容 Oracle/阿里云/搬瓦工/DMIT/腾讯云等）
+#   注意：oracle-cloud-agent 段仅在装了 OCI 官方 snap 的主机上生效；其他 VPS 会自动跳过。
 #
 # 用法:
-#   ./optimize-oracle-vps.sh [user@]host ... [--apply] [-J jump_host]
+#   ./optimize-oracle-vps.sh [user@]host[:port] ... [--apply] [-J jump_host]
+#        例: ./optimize-oracle-vps.sh root@bwg.henhaoji.site:26320 --apply
 #   ./optimize-oracle-vps.sh --local [--apply]
 #   不加 --apply 时默认 dry-run（只检查并打印将要执行的改动，不实际修改）
 #
@@ -55,11 +57,15 @@ if [ "$LOCAL_MODE" -eq 0 ] && [ ${#HOSTS[@]} -eq 0 ]; then
     exit 2
 fi
 
+# 支持 "user@host:port" 写法（如 root@bwg.henhaoji.site:26320）。
+# 目标里带 :PORT 时拆出来单独塞 -p，避免影响其他主机。
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 if [ -n "$JUMP_HOST" ]; then
     SSH_OPTS+=(-o "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -W %h:%p $JUMP_HOST")
 fi
 
+# 下面这段是【远端脚本原文】，单引号有意保留：本机不展开，原样喂给远端 bash。
+# shellcheck disable=SC2016
 REMOTE_SCRIPT='
 set -uo pipefail
 
@@ -136,6 +142,7 @@ echo
 echo "  ── 3. 最小包集合检查 (移除 dlocate/dctrl-tools/supercat) ──"
 EXTRA_PKGS=()
 for pkg in dlocate dctrl-tools supercat; do
+    # shellcheck disable=SC2016  # 这里的 ${Status} 是 dpkg 的格式串，不能由本机展开
     if dpkg-query -W -f='\''${Status}'\'' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
         EXTRA_PKGS+=("$pkg")
     fi
@@ -261,11 +268,20 @@ fi
 
 rc_all=0
 for target in "${HOSTS[@]}"; do
-    echo "════════ $target ════════"
+    # 支持 user@host:port（如 root@bwg.henhaoji.site:26320）
+    tgt="$target"; tgt_opts=()
+    case "$tgt" in
+        *:*)
+            port="${tgt##*:}"
+            tgt="${tgt%:*}"
+            tgt_opts=(-p "$port")
+            ;;
+    esac
+    echo "════════ $tgt ${tgt_opts[*]:-} ════════"
     {
         printf 'DRY_RUN=%q\n' "$DRY_RUN"
         printf '%s\n' "$REMOTE_SCRIPT"
-    } | ssh "${SSH_OPTS[@]}" "$target" 'sudo -n bash -s' || rc_all=1
+    } | ssh "${SSH_OPTS[@]}" "${tgt_opts[@]}" "$tgt" 'sudo -n bash -s' || rc_all=1
     echo
 done
 
