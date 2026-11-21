@@ -1,5 +1,35 @@
 # oci-toolkit — 甲骨文云 (OCI) 运维工具集
 
+> ## 💰 动手前必读：[`ALWAYS-FREE.md`](ALWAYS-FREE.md)
+>
+> **这份文档是为了"永远不产生费用"而写的。任何 OCI 操作（建卷/开机器/改带宽/加备份）之前先看它。**
+>
+> 最短版本 —— 三条铁律：
+>
+> 1. **只在 home region 建东西**。非 home region 的卷按常规价格计费。
+>    JP=`ap-osaka-1` / UK=`uk-london-1` / ZYUSPH=`us-phoenix-1`。
+>    ARM 额度是 **1,500 OCPU-小时 + 9,000 GB-小时/月**（≈2 OCPU+12 GB 跑满），
+>    **不是 4C24G，升级 PAYG 也不会变回来**。
+> 2. **存储 200 GB 是「引导卷 + 块卷 + 备份数据量」的硬共享配额**，必须在 home region。
+>    **当前 JP 和 ZYUSPH 都已 100% 用满（各 200 GB）** —— 再加任何一块卷、
+>    建任何备份，立刻开始扣 `$0.0255/GB/月`。UK 用了 100 GB，还有 100 GB 余量。
+> 3. **"终止保留"的引导卷照样占额度**（JP 那张 106 GB 孤立盘就是这么来的）；
+>    **Reserved Public IP 官方从不承诺免费** —— 一律用实例自带的 ephemeral IP。
+>
+> **操作前的强制检查**（改任何 OCI 资源前跑一遍）：
+>
+> ```bash
+> # 存储合计（必须 ≤ 200）
+> oci bv boot-volume list --profile <P> --compartment-id <TENANCY> --all \
+>   --query 'sum(data[]."size-in-gbs")' --raw-output
+> # 有没有多余的卷 / Reserved IP / 备份
+> oci bv boot-volume list --profile <P> --compartment-id <TENANCY> --all \
+>   --query 'data[].{n:"display-name",s:"size-in-gbs",st:"lifecycle-state"}' --output table
+> ```
+>
+> 完整速查表（额度全表、计费陷阱穷举、查询命令、预算告警设置）见 [`ALWAYS-FREE.md`](ALWAYS-FREE.md)。
+> 该文档 2026-11-21 核实，15 个官方来源，无法确认的项已明确标注"按收费处理"。
+
 面向 Oracle Cloud Infrastructure (OCI) 免费层/付费租户的轻量运维脚本合集。纯 Bash + 官方 OCI CLI，无其他依赖，适合放在家里的小主机/NAS 上常驻运行。
 
 ## 包含工具
