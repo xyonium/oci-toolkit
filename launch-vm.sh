@@ -50,6 +50,11 @@ OCI_BIN="${OCI_BIN:-oci}"
 # 若 OCI_BIN 为裸命令名（如 "oci"），先解析到真实二进制路径，避免与下方 oci() 函数同名递归
 if [ "$OCI_BIN" = "oci" ]; then OCI_BIN="$(command -v oci || true)"; fi
 PROFILE="${OCI_PROFILE:-DEFAULT}"
+# 通知里显示的账户标识。三台轮询都跑在同一台 gpu 上，hostname 一样，
+# 不区分账户的话消息完全分不清是哪个租户的轮询。
+# 优先用 .env 里的 ACCT_LABEL（可自定义，如 "ZYUSPH 凤凰城"），
+# 没设就回退到 OCI_PROFILE（DEFAULT / UK / ZYUSPH / ZPUSSJ）。
+ACCT_LABEL="${ACCT_LABEL:-$PROFILE}"
 for var in COMPARTMENT_ID SUBNET_ID; do
     [ -n "${!var:-}" ] || { echo "错误: 必填配置为空: $var（请检查 .env）" >&2; exit 1; }
 done
@@ -454,7 +459,7 @@ run_arm() {
             n_a1=$(count_running_a1)
             if [ "$n_a1" -ge "${A1_MAX_INSTANCES:-1}" ]; then
                 say "🛑 A1 预检：已有 $n_a1 个存活 $SHAPE（上限 ${A1_MAX_INSTANCES:-1}），停止轮询"
-                notify_tg "🛑 A1 预检：$(hostname) 已有 $n_a1 个存活 $SHAPE，停止轮询（若非预期请人工检查）"
+                notify_tg "🛑 A1 预检（${ACCT_LABEL}）：已有 $n_a1 个存活 $SHAPE，停止轮询（若非预期请人工检查）"
                 exit 0
             fi
         fi
@@ -462,7 +467,7 @@ run_arm() {
         hb="${HEARTBEAT_EVERY:-300}"
         if [ "$hb" -gt 0 ] && [ $((attempt % hb)) -eq 0 ]; then
             say "💌 心跳：已尝试 $attempt 次，仍容量不足，服务正常"
-            notify_tg "💌 甲骨文抢机心跳（$(hostname)）：已轮询 $attempt 次，仍容量不足，服务正常"
+            notify_tg "💌 甲骨文抢机心跳（${ACCT_LABEL}）：已轮询 $attempt 次，仍容量不足，服务正常"
         fi
 
         local out rc
@@ -491,7 +496,7 @@ run_arm() {
             say "🎉 容量到手！实例: $instance_id"
             report_instance "$instance_id"
             printf '%s\n' "$instance_id" > "$SUCCESS_FLAG" || { say "❌ 写入成功标记失败: $SUCCESS_FLAG"; exit 1; }
-            notify_tg "🎉 OCI ARM 容量到手（$(hostname)）
+            notify_tg "🎉 OCI ARM 容量到手（${ACCT_LABEL}）
 实例: ${INSTANCE_ARM_NAME}
 ${REPORT_IPS:-（IP 获取失败，看日志）}"
             say "=== 脚本结束（删除 $SUCCESS_FLAG 可重新抢容量）==="
@@ -538,7 +543,7 @@ ${REPORT_IPS:-（IP 获取失败，看日志）}"
                 fi
                 say "❌ 不可重试错误，脚本终止: $brief"
                 say "（若这是 NotAuthorizedOrNotFound：请检查 API key、compartment，或该区域是否提供 $SHAPE）"
-                notify_tg "🛑 甲骨文抢机轮询终止（$(hostname)）
+                notify_tg "🛑 甲骨文抢机轮询终止（${ACCT_LABEL}）
 错误: $brief
 需人工检查服务日志"
                 say "=== 完整输出 ==="
@@ -568,7 +573,7 @@ ${REPORT_IPS:-（IP 获取失败，看日志）}"
 if [ "$TEST_TG" -eq 1 ]; then
     say "=== 测试 Telegram 通知 ==="
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-        notify_tg "✅ 测试消息（$(hostname)）：TG 通知已配置成功"
+        notify_tg "✅ 测试消息（${ACCT_LABEL}）：TG 通知已配置成功"
         say "已发送测试消息到 chat_id=${TELEGRAM_CHAT_ID}（请查收；收不到就检查 token/chat id/网络）"
     else
         say "⚠️ TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 未配置，通知将静默跳过"
