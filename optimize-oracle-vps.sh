@@ -22,7 +22,7 @@
 #   4. 虚拟内存参数与残留冷 SwapCached 回收:
 #      保持 vm.swappiness=10；当 MemAvailable > 350MB 且 SwapUsed > 0 时，自动执行
 #      swapoff -a && swapon -a 将跨版本升级遗留的冷 SwapCached 页收回物理内存。
-#   5. mask fwupd / fwupd-refresh.timer / multipathd:
+#   5. mask fwupd / fwupd-refresh.service / fwupd-refresh.timer / multipathd:
 #      OCI 虚拟机内 fwupd 只能看到 QEMU 虚拟主板/虚拟 SCSI 盘/vCPU，无任何可刷写固件
 #      （固件与微码由 Oracle 宿主机侧维护；Ubuntu 官方 cloud image 亦已移除 fwupd），
 #      但 fwupd-refresh.timer 每天唤醒一次常驻 ~34MB。multipathd 对单路径 iSCSI 根盘
@@ -198,8 +198,8 @@ fi
 
 # 5. mask fwupd / fwupd-refresh.timer / multipathd（OCI VM 无可刷固件、单路径根盘无 multipath 对象）
 echo
-echo "  ── 5. 禁用无用常驻服务 (fwupd / fwupd-refresh / multipathd) ──"
-for unit in fwupd.service fwupd-refresh.timer multipathd.service; do
+echo "  ── 5. 禁用无用常驻服务 (fwupd / fwupd-refresh service+timer / multipathd) ──"
+for unit in fwupd.service fwupd-refresh.service fwupd-refresh.timer multipathd.service; do
     unit_state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
     case "$unit_state" in
         masked)
@@ -215,9 +215,19 @@ for unit in fwupd.service fwupd-refresh.timer multipathd.service; do
         echo "     + [dry-run] 将 mask 并停止: $unit (当前 $unit_state)"
     else
         systemctl mask --now "$unit" >/dev/null 2>&1 || true
+        # mask 之后必须 reset-failed：mask 一个已经 failed 的单元，它的
+        # failed 状态会留在 systemd 里，`systemctl --failed` 照样能数到它，
+        # 于是验收脚本会报「failed-units = 1」（2026-11-22 oraclejp 实测：
+        # fwupd-refresh.service 长期 failed，但 fwupd-refresh.timer 已 mask）。
+        systemctl reset-failed "$unit" >/dev/null 2>&1 || true
         echo "     ✅ 已 mask 并停止: $unit"
         CHANGED=$((CHANGED + 1))
     fi
+done
+
+# 同一批单元的残留 failed 状态统一清一次（幂等，已 masked 的也要清）
+for unit in fwupd.service fwupd-refresh.service fwupd-refresh.timer multipathd.service; do
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
 done
 
 # 6. 512MB /swapfile（1GB 微机内存兜底，对齐 JP/UK；fstab 持久化）
