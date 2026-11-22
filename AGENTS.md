@@ -6,7 +6,7 @@
 
 # 🚨 第一优先级：永远不要产生费用
 
-**本项目管理的三个 OCI 租户全是 Always Free（未升级 PAYG）。任何会产生费用的操作都是事故。**
+**本项目管理的四个 OCI 租户全是 Always Free（未升级 PAYG）。任何会产生费用的操作都是事故。**
 
 ## 动手前的三条铁律
 
@@ -15,11 +15,12 @@
 Always Free 只在租户的 **home region** 生效。官方原文：
 > "Volumes created outside of the home region incur regular block volume costs"
 
-| 租户 | profile | home region |
-|---|---|---|
-| DEFAULT (JP) | `DEFAULT` | `ap-osaka-1` |
-| UK | `UK` | `uk-london-1` |
-| ZYUSPH | `ZYUSPH` | `us-phoenix-1` |
+| 租户 | profile | home region | 备注 |
+|---|---|---|---|
+| DEFAULT (JP) | `DEFAULT` | `ap-osaka-1` | |
+| UK | `UK` | `uk-london-1` | |
+| ZYUSPH | `ZYUSPH` | `us-phoenix-1` | |
+| **ZPUSSJ** | `ZPUSSJ` | `us-sanjose-1`（SJC） | 2026-11-22 新增，单 AD `lsCP:US-SANJOSE-1-AD-1` |
 
 **永远不要在别的 region 创建任何资源。**
 
@@ -45,6 +46,7 @@ Always Free 只在租户的 **home region** 生效。官方原文：
 | **DEFAULT (JP)** | 2×E2.1.Micro | 2C/2G | 47+47+**106** = **200 GB** | 🔴 **0 GB 满** |
 | **UK** | 2×E2.1.Micro | 2C/2G | 50+50 = **100 GB** | 🟢 **100 GB** |
 | **ZYUSPH** | 1×A1.Flex 2C/12G + 2×E2.1.Micro | 4C/14G | 100+50+50 = **200 GB** | 🔴 **0 GB 满** |
+| **ZPUSSJ** | 1×E2.1.Micro（ARM 轮询中） | 1C/1G | 50 GB | 🟢 **150 GB** |
 
 **JP 那张 106 GB 孤立盘**是 A1 实例被回收后保留的引导卷，给 `launch-from-bv.sh` 重开机用。
 如果不再需要 ARM，**删掉它能立刻释放 106 GB**。
@@ -126,7 +128,7 @@ oci-toolkit/
 
 - **OCI CLI 不在本机**（`/home/eli/cloud/oci-toolkit`），在 **gpu 主机**：`eli@gpu`
   - 路径 `~/oci-arm-relaunch/venv/bin/oci`（版本 3.91.0）
-  - 凭据 `~/.oci/config`，3 个 profile：`DEFAULT` / `UK` / `ZYUSPH`
+  - 凭据 `~/.oci/config`，4 个 profile：`DEFAULT` / `UK` / `ZYUSPH` / `ZPUSSJ`
   - **`oci` 不在 gpu 非登录 shell 的 PATH 里**，必须用绝对路径或 `export PATH`
 - 本机是 DSH 工作区，通过 `ssh eli@gpu` 操作 OCI
 
@@ -143,3 +145,81 @@ oci-toolkit/
 
 这是**公开仓库**（https://github.com/xyonium/oci-toolkit）。
 推送前必须做账号指纹审查 —— 真实 OCID / 主机名 / IP / 凭据一律不能进公开提交。
+
+---
+
+# 新账户开荒流程（2026-11-22 ZPUSSJ 实操沉淀）
+
+按这个顺序做，每步都能独立验证：
+
+```bash
+# 0. 在 gpu 建目录（每个账户一个）
+mkdir -p ~/oci-<acct>/logs && cd ~/oci-<acct>
+# 拷 setup-vcn.sh / launch-vm.sh，写 .env（见 .env.example）
+
+# 1. 确认 home region（Always Free 的前提）
+oci --profile <P> iam region-subscription list \
+  --query 'data[].{r:"region-name",home:"is-home-region"}' --output table
+
+# 2. 建双栈 VCN —— 关键：--is-ipv6-enabled true，子网带 /64
+./setup-vcn.sh --dry-run && ./setup-vcn.sh
+# 输出会打印 SUBNET_ID，回填到 .env
+
+# 3. 开 x86（Always Free 保证 2 台）
+./launch-vm.sh --x86
+#   开 ARM：./launch-vm.sh --arm --once（退出码 3 = 没容量）
+#   没容量就挂 systemd 常驻轮询（见下）
+
+# 4. 系统优化（在本地仓库跑，脚本自己 ssh）
+bash optimize-oracle-vps.sh ubuntu@<ip> --apply
+
+# 5. podman —— ⚠️ 不要用 setup-podman.sh！
+#    它的前置闸门要求 /etc/iptables/rules.v4 含 22 端口放行 + REJECT 兜底，
+#    那是 24.04 + iptables-persistent 时代的产物。26.04 镜像虽然自带
+#    rules.v4（Oracle InstanceServices），但没有那个骨架，会直接 fail-fast。
+#    （参考机 26.04 上 iptables-persistent 已卸、rules.v4/v6 已删。）
+#    正确做法：直接 apt 装 + 手动写 podman-restart override（见下方脚本片段）
+
+# 6. 防火墙（本地仓库 vpsetup/init-firewall.sh）
+#    全新 Oracle 26.04 镜像自带 rules.v4（含 InstanceServices）+ netfilter-persistent，
+#    必须加 --converge-legacy 才能收敛成纯 nft。
+bash init-firewall.sh ubuntu@<ip> --apply --profile proxy \
+  --wan-ifaces <网卡> --enable-oci-meta --enable-podman-dnat --disable-rpcbind --converge-legacy
+#    ⚠️ --wan-ifaces 后面如果有别的开关，确认脚本版本 >= 059a91c
+#    （旧版 shift 次数错误会把后一个参数吃掉）
+
+# 7. xray 全套（本地仓库 vpsetup/setup_caddy_xray_hysteria.sh）
+DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
+```
+
+## 必须知道的三个坑
+
+**1. `launch-vm.sh` 的两个历史 bug（2026-11-22 修，commit f0aded3）**
+- 两处 `python3 -c` 忘了 `import json` → 同名实例已存在时报「解析失败」退出 1
+- `find_image` 硬编码 24.04 → 现支持 `UBUNTU_VERSION=26.04`
+
+**2. 新机 SSH key 用哪个**
+`.env` 的 `SSH_KEY_FILE` 决定实例接受哪个公钥。gpu 上：
+- `~/.ssh/authorized_keys_zyusph.pub` —— 含本地 `id_rsa` 公钥（推荐，本地能直连）
+- `~/.ssh/id_ed25519.pub` —— 只有 gpu 自己能连
+
+**3. `nftables.service` 装完常是 `enabled/inactive`**
+oneshot 类型，跑完就 dead，属正常。但**新机首次装完要手动 `systemctl start nftables`** 让 `/etc/nftables.conf` 的 include 链生效。之后重启用 `RemainAfterExit=yes` 自动恢复。
+
+## 验证清单（缺一不可）
+
+```bash
+# 服务
+systemctl is-active caddy xray hysteria-server nftables; systemctl --failed
+
+# 端口
+ss -tlnp | grep -E ':(443|80|8003|54442|8080) '
+ss -ulnp | grep -E ':(8443|20000)'
+
+# nft 表（26.04 全栈应有 5 张 inet 表）
+nft list tables    # filter / dsh_firewall / oci_meta / hysteria_nat / h3_nat
+
+# 协议端到端（用服务器自带的 xray 做客户端）
+# REALITY / WS / XHTTP 三个都要 HTTP 204
+# ⚠️ XHTTP 必须带服务端的 padding extra 参数，否则超时
+```
