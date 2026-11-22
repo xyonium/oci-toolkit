@@ -173,12 +173,18 @@ oci --profile <P> iam region-subscription list \
 # 4. 系统优化（在本地仓库跑，脚本自己 ssh）
 bash optimize-oracle-vps.sh ubuntu@<ip> --apply
 
-# 5. podman —— ⚠️ 不要用 setup-podman.sh！
-#    它的前置闸门要求 /etc/iptables/rules.v4 含 22 端口放行 + REJECT 兜底，
-#    那是 24.04 + iptables-persistent 时代的产物。26.04 镜像虽然自带
-#    rules.v4（Oracle InstanceServices），但没有那个骨架，会直接 fail-fast。
-#    （参考机 26.04 上 iptables-persistent 已卸、rules.v4/v6 已删。）
-#    正确做法：直接 apt 装 + 手动写 podman-restart override（见下方脚本片段）
+# 5. podman
+#    ./setup-podman.sh ubuntu@<ip> --apply
+#    已支持 26.04（commit 3c7d22e）。它用两个正交维度判定：
+#      NETAVARK_FW: netavark 用哪套防火墙（nft / iptables）
+#                   版本来源：已装 → apt 候选 → os-release 兜底
+#      HOST_FW:     主机防火墙形态（nft-only / iptables-persistent）
+#    阶段 3 三分支：nft / 混合形态(iptables+nft-only) / 传统(iptables+persistent)
+#
+#    ⚠️ 全新 Oracle 26.04 镜像跑完 init-firewall.sh 后必须做「收敛收尾」：
+#       卸掉 iptables-persistent、删 rules.v4/v6，否则 HOST_FW 判成
+#       iptables-persistent，阶段 0.3 会因为缺骨架而中止。
+#       详见 gc-toolkit/bootstrap-vm.md §9.1
 
 # 6. 防火墙（本地仓库 vpsetup/init-firewall.sh）
 #    全新 Oracle 26.04 镜像自带 rules.v4（含 InstanceServices）+ netfilter-persistent，
@@ -187,6 +193,21 @@ bash init-firewall.sh ubuntu@<ip> --apply --profile proxy \
   --wan-ifaces <网卡> --enable-oci-meta --enable-podman-dnat --disable-rpcbind --converge-legacy
 #    ⚠️ --wan-ifaces 后面如果有别的开关，确认脚本版本 >= 059a91c
 #    （旧版 shift 次数错误会把后一个参数吃掉）
+
+# 6.5 收敛收尾（全新 Oracle 26.04 镜像必做，否则第 5 步会失败）
+#     全新镜像自带 iptables-persistent + rules.v4（含 InstanceServices）。
+#     init-firewall.sh --converge-legacy --enable-oci-meta 之后脚本只清文件
+#     内容，不删文件、不卸包。必须手工收尾：
+#       curl -s -H 'Authorization: Bearer Oracle' \
+#         http://169.254.169.254/opc/v2/instance/hostname    # 先确认 metadata 通
+#       nft list table inet oci_meta | grep -c accept        # 应为 14
+#       STAMP=$(date +%Y%m%d-%H%M%S); mkdir -p /root/fw-backup-$STAMP
+#       cp -a /etc/iptables/rules.v4 /etc/iptables/rules.v6 /root/fw-backup-$STAMP/
+#       systemctl disable --now netfilter-persistent
+#       apt-get purge -y iptables-persistent netfilter-persistent
+#       mv /etc/iptables/rules.v4 /root/fw-backup-$STAMP/rules.v4.removed
+#       mv /etc/iptables/rules.v6 /root/fw-backup-$STAMP/rules.v6.removed
+#     参考机 zyus-1 / uk-1 都是「无 rules.v4 + 无 iptables-persistent」。
 
 # 7. xray 全套（本地仓库 vpsetup/setup_caddy_xray_hysteria.sh）
 DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
