@@ -211,6 +211,18 @@ bash init-firewall.sh ubuntu@<ip> --apply --profile proxy \
 
 # 7. xray 全套（本地仓库 vpsetup/setup_caddy_xray_hysteria.sh）
 DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
+
+# 7.1 CDN 域名（Oracle 要，GCP 不要 —— 见 docs/vps-fleet.md「CDN 域名策略」）
+#     Oracle 出站 10TB/月免费，走 CF 不吃亏；GCP 只有 200GiB，CF 回源照样算配额。
+#     流程（顺序不能反）：
+#       a. CF 建 CNAME <新>-cf → <主域名>，**先灰云**（proxied=false）
+#       b. sudo CDN_DOMAIN=<新>-cf.<你的域名> ACTION=upgrade \
+#            bash setup_caddy_xray_hysteria.sh     # source setup.env，不换凭据
+#       c. 验证 ACME 路径必须是 200（不是 301/502）——这是能不能续期的判据：
+#            curl -s -o /dev/null -w '%{http_code}' \
+#              http://<新>-cf.<你的域名>/.well-known/acme-challenge/test
+#       d. 切橙云（proxied=true），复验 ACME 路径经 CF 仍是 200
+#     分享链接会自动多出 [vless-ws-tls-cdn] 与 [vless-xhttp-cdn]。
 ```
 
 ## 必须知道的三个坑
