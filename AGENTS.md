@@ -119,7 +119,7 @@ oci-toolkit/
 ├── gather-iptables.sh     # 采集多台主机 iptables 用于对比
 ├── optimize-oracle-vps.sh # Micro 系统优化（journald/swappiness/mask/swapfile）
 ├── setup-podman.sh        # Podman 环境标准化（fail-fast + 幂等）
-├── check-arm.sh           # 一条命令看 JP/UK/ZYUSPH 三个 ARM 轮询状态
+├── check-arm.sh           # 一条命令看 JP/UK/ZYUSPH/ZPUSSJ 四个 ARM 轮询状态
 └── docs/                  # 本地文档（gitignored）
     └── project-memory.md  # 项目记忆：租户/凭据/历史决策
 ```
