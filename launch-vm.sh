@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# launch-vm.sh — 用最新 Ubuntu 24.04 镜像在 OCI 上启动实例
+# launch-vm.sh — 用最新 Ubuntu 镜像在 OCI 上启动实例（版本由 UBUNTU_VERSION 控制，默认 24.04）
 #
 # 用法: ./launch-vm.sh <--x86|--arm> [--once] [--dry-run] [env文件路径]
 #   --x86     启动 $X86_NAMES 全部实例（E2.1.Micro，47GB 引导卷），幂等、不轮询
@@ -116,14 +116,14 @@ find_image() {
     id=$(oci compute image list \
         --compartment-id "$COMPARTMENT_ID" \
         --operating-system "Canonical Ubuntu" \
-        --operating-system-version "24.04" \
+        --operating-system-version "${UBUNTU_VERSION:-24.04}" \
         --shape "$shape" \
         --sort-by TIMECREATED --sort-order DESC \
         --limit 1 \
         --query 'data[0].id' --raw-output 2>/dev/null)
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$id" ] || [ "$id" = "null" ]; then
-        say "❌ 找不到 Ubuntu 24.04 $shape 镜像（rc=$rc）"
+        say "❌ 找不到 Ubuntu ${UBUNTU_VERSION:-24.04} $shape 镜像（rc=$rc）"
         return 1
     fi
     case "$id" in
@@ -185,7 +185,7 @@ count_running_a1() {
         echo 0; return 0
     fi
     n=$(printf '%s' "$listout" | SHAPE="$SHAPE" python3 -c '
-import sys, os
+import sys, os, json
 raw = sys.stdin.read().strip()
 if not raw:          # 旧版 CLI 空结果返回零字节 = 没有实例
     print(0); sys.exit(0)
@@ -323,7 +323,7 @@ run_x86() {
                 exit 1
             fi
             existing=$(printf '%s' "$listout" | python3 -c '
-import sys
+import sys, json
 raw = sys.stdin.read().strip()
 # 旧版 CLI 空结果返回空字符串 → 视为无实例
 if not raw:
