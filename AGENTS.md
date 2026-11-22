@@ -218,10 +218,11 @@ DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
 #       a. CF 建 CNAME <新>-cf → <主域名>，**先灰云**（proxied=false）
 #       b. sudo CDN_DOMAIN=<新>-cf.<你的域名> ACTION=upgrade \
 #            bash setup_caddy_xray_hysteria.sh     # source setup.env，不换凭据
-#       c. 验证 ACME 路径必须是 200（不是 301/502）——这是能不能续期的判据：
-#            curl -s -o /dev/null -w '%{http_code}' \
-#              http://<新>-cf.<你的域名>/.well-known/acme-challenge/test
-#       d. 切橙云（proxied=true），复验 ACME 路径经 CF 仍是 200
+#       c. 确认证书签下来了（不要用 ACME 路径的状态码判断，那是探测假象）：
+#            sudo ls /var/lib/caddy/.local/share/caddy/certificates/*/ | grep -- '-cf'
+#       d. 切橙云（proxied=true），复验站点 https 200
+#      注：Caddy 的 ACME 处理器在 Server.ServeHTTP 入口拦截，优先级高于所有用户路由，
+#          http:// 块里写什么都抢不走它。详见 docs/vps-fleet.md
 #     分享链接会自动多出 [vless-ws-tls-cdn] 与 [vless-xhttp-cdn]。
 ```
 
