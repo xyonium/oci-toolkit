@@ -1,5 +1,14 @@
 # AGENTS.md — oci-toolkit 项目指引
 
+# 🚨🚨 最高红线：禁止操作清单
+
+**动手前先读 [`../docs/DO-NOT-TOUCH.md`](../docs/DO-NOT-TOUCH.md)。**
+其中含一台**国内公司正式服务服务器**，任何改动都必须先获得用户明确审批。
+
+---
+
+
+
 本文件是本仓库的项目指引，**DSH / Claude Code / 任何 AI agent 读它**。
 
 ---
