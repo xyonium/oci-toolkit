@@ -118,7 +118,7 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 ./optimize-oracle-vps.sh ubuntu@<host> ... --apply    # 实际执行
 ```
 
-优化项（详见脚本头部注释的实测根因）：oracle-cloud-agent snap 旧修订版清理；journald 上限 100M（防 `podman logs` 全量扫描数 GB 日志冲垮 Page Cache）；最小包集合（purge dlocate/dctrl-tools/supercat）；`vm.swappiness=10` + 冷 SwapCached 回收；**mask `fwupd`/`fwupd-refresh.timer`/`multipathd`**（OCI 虚拟机内无可刷写固件——固件/微码由 Oracle 宿主机侧维护，Ubuntu 官方 cloud image 亦已移除 fwupd；单路径 iSCSI 根盘无 multipath 管理对象；两者合计常驻 ~60MB，JP/UK 已跨重启验证无影响）；**创建 512MB `/swapfile` 并写入 fstab**（1GB 微机内存兜底，已挂载则跳过、fstab 缺条目则补写）。
+优化项（详见脚本头部注释的实测根因）：oracle-cloud-agent snap 旧修订版清理；journald 上限 100M（防 `podman logs` 全量扫描数 GB 日志冲垮 Page Cache）；最小包集合（purge dlocate/dctrl-tools/supercat）；`vm.swappiness=10` + 冷 SwapCached 回收；**mask `fwupd`/`fwupd-refresh.timer`/`multipathd`**（OCI 虚拟机内无可刷写固件——固件/微码由 Oracle 宿主机侧维护，Ubuntu 官方 cloud image 亦已移除 fwupd；单路径 iSCSI 根盘无 multipath 管理对象；两者合计常驻 ~60MB，JP/UK 已跨重启验证无影响）；**创建 512MB `/swapfile` 并写入 fstab**（1GB 微机内存兜底，已挂载则跳过、fstab 缺条目则补写）；**启用 BBR + `fq`（保留 `mq` 多队列，并通过 `/usr/local/sbin/dsh-apply-fq` + `dsh-bbr-qdisc.service` 防止 Oracle 26.04 initramfs 阶段 `ens3` 留在 `pfifo_fast`）+ `tcp_mtu_probing=1`**。
 
 ### 7. `setup-podman.sh` — Podman 容器环境标准化（严格前置校验 + 幂等）
 
