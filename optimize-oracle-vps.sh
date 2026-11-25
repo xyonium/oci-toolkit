@@ -752,6 +752,36 @@ dsh_bbr_baseline_apply() {
         } > "$tmp"
         chmod 600 "$tmp"
         mv -f "$tmp" "$DSH_BBR_STATE_ROOT/prev.env"
+    elif [ -n "$dev_csv" ] && [ -z "$(_dsh_bbr_env_get "$DSH_BBR_STATE_ROOT/prev.env" "PREV_NIC_QDISCS")" ]; then
+        # 两阶段衔接（Phase 1 为 --no-live-qdisc）：补记尚为空的网卡原始 qdisc 快照，避免 --restore 缺快照
+        local pfile="$DSH_BBR_STATE_ROOT/prev.env"
+        local nic_qdiscs="" bk_apply_bin="" bk_svc="" bk_svc_en="" bk_svc_ac=""
+        local init_bk_dir="$DSH_BBR_STATE_ROOT/init-backups"
+        mkdir -p "$init_bk_dir" || return 1
+        nic_qdiscs="$(_dsh_bbr_snapshot_nic_qdiscs "$dev_csv")"
+        if [ -z "$(_dsh_bbr_env_get "$pfile" "BK_APPLY_BIN")" ] && [ -e "$DSH_BBR_APPLY_BIN" ]; then
+            bk_apply_bin="$init_bk_dir/dsh-apply-fq"
+            cp -a "$DSH_BBR_APPLY_BIN" "$bk_apply_bin" || return 1
+        fi
+        if [ -z "$(_dsh_bbr_env_get "$pfile" "BK_SVC")" ] && [ -e "$DSH_BBR_SVC_FILE" ]; then
+            bk_svc="$init_bk_dir/dsh-bbr-qdisc.service"
+            cp -a "$DSH_BBR_SVC_FILE" "$bk_svc" || return 1
+            bk_svc_en="$(systemctl is-enabled "$(basename "$DSH_BBR_SVC_FILE")" 2>/dev/null || echo disabled)"
+            bk_svc_ac="$(systemctl is-active "$(basename "$DSH_BBR_SVC_FILE")" 2>/dev/null || echo inactive)"
+        fi
+        tmp="$(mktemp "$DSH_BBR_STATE_ROOT/.prev.XXXXXX")" || return 1
+        awk -v devs="$dev_csv" -v nq="$nic_qdiscs" -v ba="$bk_apply_bin" -v bs="$bk_svc" -v bse="$bk_svc_en" -v bsa="$bk_svc_ac" '
+            BEGIN{FS="="; OFS="="}
+            $1=="PREV_DEVS" && $2=="" {print "PREV_DEVS", devs; next}
+            $1=="PREV_NIC_QDISCS" && $2=="" {print "PREV_NIC_QDISCS", nq; next}
+            $1=="BK_APPLY_BIN" && $2=="" && ba!="" {print "BK_APPLY_BIN", ba; next}
+            $1=="BK_SVC" && $2=="" && bs!="" {print "BK_SVC", bs; next}
+            $1=="BK_SVC_ENABLED" && $2=="" && bse!="" {print "BK_SVC_ENABLED", bse; next}
+            $1=="BK_SVC_ACTIVE" && $2=="" && bsa!="" {print "BK_SVC_ACTIVE", bsa; next}
+            {print}
+        ' "$pfile" > "$tmp"
+        chmod 600 "$tmp"
+        mv -f "$tmp" "$pfile"
     fi
 
     # ── 阶段 C：原子写入、校验生效与单次切换 ──
