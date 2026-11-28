@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
-# check-arm.sh — 查看三台 ARM 容量轮询的当前状态（JP / UK / ZYUSPH，均运行在 gpu 上）
+# check-arm.sh — 查看各 ARM 容量轮询的当前状态（JP / UK / ZYUSPH / ZPUSSJ / AUMEL，均运行在 gpu 上）
 #
 # 用法: ./check-arm.sh              # 一次性查看
 #       ./check-arm.sh --follow     # 持续跟踪 UK 日志（Ctrl-C 退出）
 #
-# 三台轮询都跑在 gpu (ssh eli@gpu) 上，是不同的 systemd user 服务：
+# 轮询都跑在 gpu (ssh eli@gpu) 上，是不同的 systemd user 服务：
 #   oci-arm-relaunch  → JP(ap-osaka-1)，基于 106GB 保留引导卷重开 A1.Flex
-#   oci-uk-arm        → UK(uk-london-1)，用最新 Ubuntu 24.04 镜像新建 A1.Flex
-#   oci-zyusph-arm    → ZYUSPH(us-phoenix-1)，用最新 Ubuntu 24.04 镜像新建 A1.Flex
+#   oci-uk-arm        → UK(uk-london-1)，用最新 Ubuntu 镜像新建 A1.Flex
+#   oci-zyusph-arm    → ZYUSPH(us-phoenix-1)，用最新 Ubuntu 镜像新建 A1.Flex（已收工）
+#   oci-zpussj-arm    → ZPUSSJ(us-sanjose-1)，用最新 Ubuntu 镜像新建 A1.Flex
+#   oci-aumel-arm     → AUMEL(ap-melbourne-1)，用最新 Ubuntu 镜像新建 A1.Flex
 #
 # 退出码: 0=至少一台已成功拿到实例 / 1=都还在轮询 / 2=服务异常或无法连接
 
@@ -24,7 +26,7 @@ fi
 
 ssh -o BatchMode=yes -o ConnectTimeout=15 "$GPU_HOST" 'bash -s' <<'REMOTE'
 rc_bad=0
-for pair in "oci-arm-relaunch:JP(ap-osaka-1):~/oci-arm-relaunch" "oci-uk-arm:UK(uk-london-1):~/oci-uk" "oci-zyusph-arm:ZYUSPH(us-phoenix-1):~/oci-zyusph"; do
+for pair in "oci-arm-relaunch:JP(ap-osaka-1):~/oci-arm-relaunch" "oci-uk-arm:UK(uk-london-1):~/oci-uk" "oci-zyusph-arm:ZYUSPH(us-phoenix-1):~/oci-zyusph" "oci-zpussj-arm:ZPUSSJ(us-sanjose-1):~/oci-zpussj" "oci-aumel-arm:AUMEL(ap-melbourne-1):~/oci-aumel"; do
     svc="${pair%%:*}"; rest="${pair#*:}"; label="${rest%%:*}"; dir="${rest#*:}"
     dir="${dir/#\~/$HOME}"
 
