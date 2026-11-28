@@ -8,9 +8,10 @@
 #   步骤顺序和收尾动作靠人记必然会漏 —— 固化成脚本。
 #
 # 用法:
-#   ./provision-oracle-node.sh <user@host> --domain <域名> --wan-iface <网卡> [--apply]
-#   ./provision-oracle-node.sh ubuntu@1.2.3.4 --domain <你的域名> \
-#       --wan-iface ens3 --apply
+#   ./provision-oracle-node.sh <user@host> --domain <域名> --wan-iface <网卡> \
+#       --email <邮箱> [--apply]
+#   ./provision-oracle-node.sh ubuntu@1.2.3.4 --domain node.example.com \
+#       --wan-iface ens3 --email you@example.com --apply
 #
 # 不做 --apply 时是 dry-run（只跑各脚本的 dry-run，不改任何东西）
 #
@@ -50,6 +51,11 @@ done
 
 [ -n "$TARGET" ]   || die "缺少 <user@host>"
 [ -n "$DOMAIN" ]   || die "缺少 --domain"
+# EMAIL 只用于 Let's Encrypt 注册邮箱（xray 那步），不设默认值：
+# 仓库是公开的，写死真实邮箱等于泄露账号指纹。--skip-xray 时可不填。
+if [ "$SKIP_XRAY" != "1" ] && [ -z "$EMAIL" ]; then
+    die "缺少 --email（Let's Encrypt 注册用；仅 --skip-xray 时可省略）"
+fi
 [ -n "$WAN_IFACE" ] || die "缺少 --wan-iface（用 ip -o link show 查，通常 ens3/ens4/enp0s6）"
 
 MODE="dry-run"; [ "$APPLY" = "1" ] && MODE="apply"
