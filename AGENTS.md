@@ -15,7 +15,7 @@
 
 # 🚨 第一优先级：永远不要产生费用
 
-**本项目管理的四个 OCI 租户全是 Always Free（未升级 PAYG）。任何会产生费用的操作都是事故。**
+**本项目管理的五个 OCI 租户全是 Always Free（未升级 PAYG）。任何会产生费用的操作都是事故。**
 
 ## 动手前的三条铁律
 
@@ -30,6 +30,7 @@ Always Free 只在租户的 **home region** 生效。官方原文：
 | UK | `UK` | `uk-london-1` | |
 | ZYUSPH | `ZYUSPH` | `us-phoenix-1` | |
 | **ZPUSSJ** | `ZPUSSJ` | `us-sanjose-1`（SJC） | 2026-11-22 新增，单 AD `lsCP:US-SANJOSE-1-AD-1` |
+| **AUMEL** | `AUMEL` | `ap-melbourne-1`（MEL） | 2026-11-28 新增，单 AD `gYfh:AP-MELBOURNE-1-AD-1` |
 
 **永远不要在别的 region 创建任何资源。**
 
@@ -48,7 +49,7 @@ Always Free 只在租户的 **home region** 生效。官方原文：
 - **实例终止后保留的引导卷照样占额度**
 - 满额租户**不要挂 backup policy**（会自动建备份）
 
-## 各租户当前用量（2026-11-21 实测）
+## 各租户当前用量（2026-11-28 实测）
 
 | 租户 | 实例 | 计算 | 引导卷 | 存储余量 |
 |---|---|---|---|---|
@@ -56,6 +57,7 @@ Always Free 只在租户的 **home region** 生效。官方原文：
 | **UK** | 2×E2.1.Micro | 2C/2G | 50+50 = **100 GB** | 🟢 **100 GB** |
 | **ZYUSPH** | 1×A1.Flex 2C/12G + 2×E2.1.Micro | 4C/14G | 100+50+50 = **200 GB** | 🔴 **0 GB 满** |
 | **ZPUSSJ** | 1×E2.1.Micro（ARM 轮询中） | 1C/1G | 50 GB | 🟢 **150 GB** |
+| **AUMEL** | 2×E2.1.Micro（ARM 轮询中） | 2C/2G | 50+50 = **100 GB** | 🟢 **100 GB**（预留给 ARM 的 100 GB） |
 
 **JP 那张 106 GB 孤立盘**是 A1 实例被回收后保留的引导卷，给 `launch-from-bv.sh` 重开机用。
 如果不再需要 ARM，**删掉它能立刻释放 106 GB**。
@@ -128,7 +130,8 @@ oci-toolkit/
 ├── gather-iptables.sh     # 采集多台主机 iptables 用于对比
 ├── optimize-oracle-vps.sh # Micro 系统优化（journald/swappiness/mask/swapfile）
 ├── setup-podman.sh        # Podman 环境标准化（fail-fast + 幂等）
-├── check-arm.sh           # 一条命令看 JP/UK/ZYUSPH/ZPUSSJ 四个 ARM 轮询状态
+├── provision-oracle-node.sh # 一条命令走完 26.04 节点开荒（优化/防火墙/收敛/podman/xray/验收）
+├── check-arm.sh           # 一条命令看 JP/UK/ZYUSPH/ZPUSSJ/AUMEL 五个 ARM 轮询状态
 └── docs/                  # 本地文档（gitignored）
     └── project-memory.md  # 项目记忆：租户/凭据/历史决策
 ```
@@ -137,7 +140,7 @@ oci-toolkit/
 
 - **OCI CLI 不在本机**（`/home/eli/cloud/oci-toolkit`），在 **gpu 主机**：`eli@gpu`
   - 路径 `~/oci-arm-relaunch/venv/bin/oci`（版本 3.91.0）
-  - 凭据 `~/.oci/config`，4 个 profile：`DEFAULT` / `UK` / `ZYUSPH` / `ZPUSSJ`
+  - 凭据 `~/.oci/config`，5 个 profile：`DEFAULT` / `UK` / `ZYUSPH` / `ZPUSSJ` / `AUMEL`
   - **`oci` 不在 gpu 非登录 shell 的 PATH 里**，必须用绝对路径或 `export PATH`
 - 本机是 DSH 工作区，通过 `ssh eli@gpu` 操作 OCI
 
@@ -233,6 +236,23 @@ DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
 #      注：Caddy 的 ACME 处理器在 Server.ServeHTTP 入口拦截，优先级高于所有用户路由，
 #          http:// 块里写什么都抢不走它。详见 docs/vps-fleet.md
 #     分享链接会自动多出 [vless-ws-tls-cdn] 与 [vless-xhttp-cdn]。
+
+# 8. 一条命令走完 4–8（2026-11-28 AUMEL 起推荐）
+#    bash provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 --apply
+#    内部顺序：optimize → init-firewall(--converge-legacy --enable-oci-meta)
+#              → 收敛收尾（卸 iptables-persistent + flush 内核 iptables）
+#              → setup-podman → setup_caddy_xray_hysteria → systemctl start nftables
+#              → verify-bootstrap.sh 28 项
+#    x86 每台跑一次即可（幂等）；ARM 落地后 --wan-iface 用 enp0s6（ARM 网卡名不同）。
+
+# 8.1 协议端到端验收（28 项 bootstrap 不含这一层）
+#    sudo bash verify-node-proto.sh        # 本地 .tools/bin/verify-node-proto.sh
+#    判定：REALITY / WS(直连+CDN) / XHTTP(直连+CDN) 全部 HTTP 204
+#    两个必踩的坑：
+#      · flow(xtls-rprx-vision) 只对 TCP+REALITY/TLS 有效。WS/XHTTP 客户端若带上，
+#        客户端直接报 "XTLS only supports TLS and REALITY dir"，看起来像服务端坏了。
+#      · XHTTP 的 padding extra 必须与服务端 xhttpSettings.extra **逐字节**一致；
+#        从 setup.env 的 XPADDING_* 自己拼容易漏字段 → 服务端回 400。
 ```
 
 ## 必须知道的三个坑
@@ -262,7 +282,7 @@ ss -ulnp | grep -E ':(8443|20000)'
 # nft 表（26.04 全栈应有 5 张 inet 表）
 nft list tables    # filter / dsh_firewall / oci_meta / hysteria_nat / h3_nat
 
-# 协议端到端（用服务器自带的 xray 做客户端）
-# REALITY / WS / XHTTP 三个都要 HTTP 204
-# ⚠️ XHTTP 必须带服务端的 padding extra 参数，否则超时
+# 协议端到端（用服务器自带的 xray 当客户端；bootstrap 28 项不含这一层）
+# REALITY/WS/XHTTP 全部 204：见 ../.tools/bin/verify-node-proto.sh（在节点本机跑）
+# ⚠️ XHTTP 的 padding extra 必须取自服务端 xhttpSettings.extra，自己拼会 400
 ```

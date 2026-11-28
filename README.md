@@ -124,7 +124,22 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 
 脏状态（Docker 残留链/不纯的 rules.v4/v6）一律 fail-fast 报错，绝不盲目自动拼接；通过后安装 Podman + crun + podman-compose 并固化 `00-shortnames.conf`。
 
-### 8. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
+### 8. `provision-oracle-node.sh` — 26.04 节点一条命令开荒（幂等）
+
+```bash
+./provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 --apply
+```
+
+把「新机上线」固化成一条命令，按顺序跑并逐段校验：系统基线优化 → nft 主机防火墙
+（`--converge-legacy --enable-oci-meta`）→ **收敛收尾**（卸 `iptables-persistent`、移走
+`rules.v4/v6`、flush 内核里的旧 iptables 规则，否则后续 podman 判定会中止）→ `setup-podman.sh`
+→ `setup_caddy_xray_hysteria.sh`（REALITY/WS/XHTTP + Hysteria2）→ `systemctl start nftables`
+→ `verify-bootstrap.sh` 28 项验收。不加 `--apply` 即全程 dry-run。
+
+> 顺序是踩出来的：收敛收尾必须在 podman 之前，而 `oci_meta` 又必须在收尾之前接管
+> InstanceServices —— 脚本会先确认 `nft list table inet oci_meta` 里 accept ≥ 10 才动手。
+
+### 9. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
 
 TODO：定期把指定引导卷备份/复制到另一个区域，异地容灾。
 
@@ -250,7 +265,8 @@ oci-toolkit/
 ├── gather-iptables.sh    # 采集多台主机的 iptables 配置用于对比
 ├── optimize-oracle-vps.sh # E2.1.Micro 系统级优化（journald/swappiness/mask 无用服务/swapfile）
 ├── setup-podman.sh       # Podman 环境标准化（fail-fast 前置校验 + 幂等）
-├── check-arm.sh          # 一条命令查看 JP/UK/ZYUSPH 三个 ARM 轮询的状态与进度
+├── provision-oracle-node.sh # 26.04 节点一条命令开荒（优化/防火墙/收敛/podman/xray/验收）
+├── check-arm.sh          # 一条命令查看 JP/UK/ZYUSPH/ZPUSSJ/AUMEL 五个 ARM 轮询的状态与进度
 ├── setup.sh              # 安装 + systemd 服务管理
 ├── docs/                 # 设计文档
 └── README.md
