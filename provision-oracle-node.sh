@@ -127,7 +127,10 @@ fi
 step "2. 收敛收尾前置确认：oci_meta 是否完整"
 #   注意顺序：必须在卸 iptables-persistent 之前确认 nft 已接管 InstanceServices
 # ─────────────────────────────────────────────────────────────────────────────
-OCI_META_N=$(remote 'nft list table inet oci_meta 2>/dev/null | grep -c accept' 2>/dev/null || echo 0)
+# 注意：nft 需要 root，非 root 下 table 读不到会静默变成 0（曾据此误判「还没跑过」）。
+OCI_META_N=$(remote 'sudo -n nft list table inet oci_meta 2>/dev/null | grep -c accept || true' 2>/dev/null)
+OCI_META_N="$(printf '%s' "$OCI_META_N" | tr -dc '0-9')"
+OCI_META_N="${OCI_META_N:-0}"
 echo "  oci_meta accept 条数: $OCI_META_N"
 if [ "${OCI_META_N:-0}" -ge 10 ]; then
     ok "oci_meta 已接管 InstanceServices"
