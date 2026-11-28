@@ -139,6 +139,9 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 
 > 顺序是踩出来的：收敛收尾必须在 podman 之前，而 `oci_meta` 又必须在收尾之前接管
 > InstanceServices —— 脚本会先确认 `nft list table inet oci_meta` 里 accept ≥ 10 才动手。
+>
+> 装完用 `verify-node-proto.sh`（在节点本机跑）确认链路真的通：REALITY / WS(直连+CDN) /
+> XHTTP(直连+CDN) 五条全部 204 —— 28 项 bootstrap 验收不含这一层。
 
 ### 9. `cross-region-copy.sh` — 引导卷跨区复制（规划中）
 
@@ -267,6 +270,7 @@ oci-toolkit/
 ├── optimize-oracle-vps.sh # E2.1.Micro 系统级优化（journald/swappiness/mask 无用服务/swapfile）
 ├── setup-podman.sh       # Podman 环境标准化（fail-fast 前置校验 + 幂等）
 ├── provision-oracle-node.sh # 26.04 节点一条命令开荒（优化/防火墙/收敛/podman/xray/验收）
+├── verify-node-proto.sh  # 协议端到端验收（REALITY/WS/XHTTP × 直连+CDN，判定 204）
 ├── check-arm.sh          # 一条命令查看 JP/UK/ZYUSPH/ZPUSSJ/AUMEL 五个 ARM 轮询的状态与进度
 ├── setup.sh              # 安装 + systemd 服务管理
 ├── docs/                 # 设计文档

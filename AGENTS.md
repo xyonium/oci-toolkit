@@ -131,6 +131,7 @@ oci-toolkit/
 ├── optimize-oracle-vps.sh # Micro 系统优化（journald/swappiness/mask/swapfile）
 ├── setup-podman.sh        # Podman 环境标准化（fail-fast + 幂等）
 ├── provision-oracle-node.sh # 一条命令走完 26.04 节点开荒（优化/防火墙/收敛/podman/xray/验收）
+├── verify-node-proto.sh  # 节点本机协议端到端（REALITY/WS/XHTTP × 直连+CDN 全 204）
 ├── check-arm.sh           # 一条命令看 JP/UK/ZYUSPH/ZPUSSJ/AUMEL 五个 ARM 轮询状态
 └── docs/                  # 本地文档（gitignored）
     └── project-memory.md  # 项目记忆：租户/凭据/历史决策
@@ -247,7 +248,7 @@ DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
 #    x86 每台跑一次即可（幂等）；ARM 落地后 --wan-iface 用 enp0s6（ARM 网卡名不同）。
 
 # 8.1 协议端到端验收（28 项 bootstrap 不含这一层）
-#    sudo bash verify-node-proto.sh        # 本地 .tools/bin/verify-node-proto.sh
+#    sudo bash verify-node-proto.sh        # 在节点本机跑（仓库根目录的脚本）
 #    判定：REALITY / WS(直连+CDN) / XHTTP(直连+CDN) 全部 HTTP 204
 #    两个必踩的坑：
 #      · flow(xtls-rprx-vision) 只对 TCP+REALITY/TLS 有效。WS/XHTTP 客户端若带上，
@@ -284,6 +285,6 @@ ss -ulnp | grep -E ':(8443|20000)'
 nft list tables    # filter / dsh_firewall / oci_meta / hysteria_nat / h3_nat
 
 # 协议端到端（用服务器自带的 xray 当客户端；bootstrap 28 项不含这一层）
-# REALITY/WS/XHTTP 全部 204：见 ../.tools/bin/verify-node-proto.sh（在节点本机跑）
+# REALITY/WS/XHTTP 全部 204：见仓库根目录 verify-node-proto.sh（在节点本机跑）
 # ⚠️ XHTTP 的 padding extra 必须取自服务端 xhttpSettings.extra，自己拼会 400
 ```
