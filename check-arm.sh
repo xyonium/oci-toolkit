@@ -2,8 +2,9 @@
 #
 # check-arm.sh — 查看各 ARM 容量轮询的当前状态（JP / UK / ZYUSPH / ZPUSSJ / AUMEL，均运行在 gpu 上）
 #
-# 用法: ./check-arm.sh              # 一次性查看
-#       ./check-arm.sh --follow     # 持续跟踪 UK 日志（Ctrl-C 退出）
+# 用法: ./check-arm.sh                 # 一次性查看
+#       ./check-arm.sh --follow [租户]  # 持续跟踪某租户日志（默认 uk；Ctrl-C 退出）
+#       租户可选: jp / uk / zyusph / zpussj / aumel
 #
 # 轮询都跑在 gpu (ssh eli@gpu) 上，是不同的 systemd user 服务：
 #   oci-arm-relaunch  → JP(ap-osaka-1)，基于 106GB 保留引导卷重开 A1.Flex
@@ -19,9 +20,19 @@ set -uo pipefail
 GPU_HOST="${GPU_HOST:-eli@gpu}"
 
 if [ "${1:-}" = "--follow" ]; then
-    echo "跟踪 UK ARM 日志（Ctrl-C 退出）..."
+    # 原实现写死跟 UK（当时只有 UK 在轮询）。现在五个租户都在跑，
+    # 用第二个参数选租户，默认 uk 保持旧行为不变。
+    case "${2:-uk}" in
+        jp|JP)         dir="oci-arm-relaunch" ;;
+        uk|UK)         dir="oci-uk" ;;
+        zyusph|ZYUSPH) dir="oci-zyusph" ;;
+        zpussj|ZPUSSJ) dir="oci-zpussj" ;;
+        aumel|AUMEL)   dir="oci-aumel" ;;
+        *) echo "未知租户: ${2:-}（可选 jp / uk / zyusph / zpussj / aumel）" >&2; exit 2 ;;
+    esac
+    echo "跟踪 ${dir} 的 ARM 日志（Ctrl-C 退出）..."
     exec ssh -o BatchMode=yes "$GPU_HOST" \
-        'tail -f ~/oci-uk/logs/launch-arm.log'
+        "tail -f ~/$dir/logs/launch-arm.log"
 fi
 
 ssh -o BatchMode=yes -o ConnectTimeout=15 "$GPU_HOST" 'bash -s' <<'REMOTE'
