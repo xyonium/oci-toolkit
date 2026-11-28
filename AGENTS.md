@@ -238,7 +238,8 @@ DOMAIN=<域名> EMAIL=<邮箱> bash setup_caddy_xray_hysteria.sh
 #     分享链接会自动多出 [vless-ws-tls-cdn] 与 [vless-xhttp-cdn]。
 
 # 8. 一条命令走完 4–8（2026-11-28 AUMEL 起推荐）
-#    bash provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 --apply
+#    bash provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 \
+#         --email <你的邮箱> --apply      # --email 现在必填（LE 注册用，仓库里不放真实邮箱）
 #    内部顺序：optimize → init-firewall(--converge-legacy --enable-oci-meta)
 #              → 收敛收尾（卸 iptables-persistent + flush 内核 iptables）
 #              → setup-podman → setup_caddy_xray_hysteria → systemctl start nftables

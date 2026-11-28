@@ -127,7 +127,8 @@ systemd 单元建议带 `RestartPreventExitStatus=1`：退出码 1 表示参数/
 ### 8. `provision-oracle-node.sh` — 26.04 节点一条命令开荒（幂等）
 
 ```bash
-./provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 --apply
+./provision-oracle-node.sh ubuntu@<ip> --domain <域名> --wan-iface ens3 \
+    --email you@example.com --apply
 ```
 
 把「新机上线」固化成一条命令，按顺序跑并逐段校验：系统基线优化 → nft 主机防火墙
